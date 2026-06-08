@@ -22,7 +22,7 @@ import { CauseLegend } from "@/components/CauseLegend"
 import { DnsSignal } from "@/components/DnsSignal"
 import { DateRangePicker } from "@/components/DateRangePicker"
 import { AlertSettings } from "@/components/AlertSettings"
-import { TargetSettings } from "@/components/TargetSettings"
+import { TargetsPopover } from "@/components/TargetsPopover"
 import { ReportView } from "@/components/ReportView"
 import { InfoTip } from "@/components/InfoTip"
 import type { Live, Meta, RangeData } from "@/lib/types"
@@ -51,6 +51,10 @@ const DEGRADED_OPTS = [
 const BROWNOUT_OPTS = [
   { v: 0, label: "Off" }, { v: 500, label: "500 ms" }, { v: 750, label: "750 ms" },
   { v: 1000, label: "1000 ms" }, { v: 1500, label: "1500 ms" },
+]
+const TIMEOUT_OPTS = [
+  { v: 1000, label: "1.0 s (strict)" }, { v: 1500, label: "1.5 s" },
+  { v: 2000, label: "2.0 s" }, { v: 3000, label: "3.0 s (lenient)" },
 ]
 
 function ConfigSelect({ value, options, onChange }: {
@@ -233,6 +237,7 @@ export default function App() {
           title: "Configuration",
           rows: [
             { label: "Check interval", control: <ConfigSelect value={meta.interval} options={INTERVAL_OPTS} onChange={(v) => updateConfig("interval", v)} />, hint: "How often a connectivity check runs. Takes effect within a cycle; the rest of the app follows the new cadence." },
+            { label: "Response cutoff", control: <ConfigSelect value={meta.timeout_ms} options={TIMEOUT_OPTS} onChange={(v) => updateConfig("timeout_ms", v)} />, hint: "A server must answer within this or the check counts as down (a real outage), so a connection that's technically reachable but too slow to use still registers. Lower is stricter; the retry debounce means only sustained slowness counts, not one-off blips." },
             { label: "Slow threshold", control: <ConfigSelect value={meta.degraded_ms} options={DEGRADED_OPTS} onChange={(v) => updateConfig("degraded_ms", v)} />, hint: "Latency above this counts as 'slow but up': shown as the Slow tile and a shaded zone on the latency chart. Off disables it." },
             { label: "Brownout threshold", control: <ConfigSelect value={meta.brownout_ms} options={BROWNOUT_OPTS} onChange={(v) => updateConfig("brownout_ms", v)} />, hint: "Sustained latency above this is recorded as a brownout event (the connection is up but very slow). Shown amber in the outages list and on the latency chart, and alertable. Off disables it." },
             { label: "Gateway", value: meta.gateway ?? "Unknown", hint: "Your router's local IP. Used to tell a local problem apart from an ISP problem." },
@@ -261,16 +266,6 @@ export default function App() {
             { label: "Outage history", control: <ConfigSelect value={meta.outage_retention_days} options={OUTAGE_OPTS} onChange={(v) => updateConfig("outage_retention_days", v)} />, hint: "How long resolved outages are kept. Independent of the raw-data retention above." },
           ],
         },
-        ...(meta.resolvers?.length
-          ? [{
-              title: "DNS resolvers",
-              rows: meta.resolvers.map((ip) => ({
-                label: resolverName(ip),
-                value: ip,
-                hint: "A public DNS resolver the monitor queries to confirm name resolution. DNS is tracked as its own signal and never counts as connectivity downtime.",
-              })),
-            }]
-          : []),
       ]
     : []
 
@@ -446,16 +441,30 @@ export default function App() {
               </div>
             )}
 
+            {meta && !!meta.resolvers?.length && (
+              <div className="mb-4">
+                {sectionHeader("DNS resolvers")}
+                <div className="space-y-0.5 text-xs">
+                  {meta.resolvers.map((ip) => (
+                    <div key={ip} className="-mx-2 flex items-center justify-between gap-3 rounded-md px-2 py-1 transition-colors hover:bg-muted/40">
+                      <InfoTip label="A public DNS resolver the monitor queries to confirm name resolution. DNS is tracked as its own signal and never counts as connectivity downtime.">
+                        <span className="border-b border-dotted border-muted-foreground/40 text-muted-foreground">{resolverName(ip)}</span>
+                      </InfoTip>
+                      <span className="text-right font-mono text-foreground/80">{ip}</span>
+                    </div>
+                  ))}
+                </div>
+                {/* Compact entry point to the reachability-targets editor (kept out of the way). */}
+                <div className="mt-1.5 px-0.5">
+                  <TargetsPopover targets={meta.targets} custom={meta.targets_custom} onSaved={refetchMeta} />
+                </div>
+              </div>
+            )}
+
             {meta && (
               <div className="mb-4 border-t border-border/40 pt-3">
                 {sectionHeader("Alerts")}
                 <AlertSettings alerts={meta.alerts} onSaved={refetchMeta} />
-              </div>
-            )}
-            {meta && (
-              <div className="mb-4 border-t border-border/40 pt-3">
-                {sectionHeader("Targets")}
-                <TargetSettings targets={meta.targets} custom={meta.targets_custom} onSaved={refetchMeta} />
               </div>
             )}
 

@@ -67,6 +67,12 @@ DEGRADED_MS = int(os.environ.get("UPTIME_DEGRADED_MS", "250"))  # per-check "slo
 CFG_BROWNOUT_OPTIONS = (0, 500, 750, 1000, 1500)
 BROWNOUT_MS = int(os.environ.get("UPTIME_BROWNOUT_MS", "750"))
 BROWNOUT_CAP, BROWNOUT_ON, BROWNOUT_OFF = 6, 4, 1
+# Response cutoff: a target must answer a TCP connect within this many ms or it doesn't count as
+# answering, so a connection that's technically reachable but crawling counts as DOWN (a real
+# outage) rather than "up". The retry burst still debounces, so only SUSTAINED slowness registers.
+# Lower = stricter. Re-read live; whitelisted.
+CFG_TIMEOUT_OPTIONS = (1000, 1500, 2000, 3000)
+TIMEOUT_MS_DEFAULT = 1000
 CONFIRM_RETRIES = int(os.environ.get("UPTIME_CONFIRM_RETRIES", "3"))  # extra tries before "down"
 RETRY_GAP = float(os.environ.get("UPTIME_RETRY_GAP", "1.0"))   # seconds between confirm tries
 PAUSE_FILE = os.path.join(BASE, "PAUSED")
@@ -120,14 +126,14 @@ def _now():
 
 
 # ---- probes -----------------------------------------------------------------
-def check_once(targets=TARGETS):
+def check_once(targets=TARGETS, timeout=TIMEOUT):
     """Return (up: bool, latency_ms: float|None). Short-circuits: returns as soon
-    as ANY target answers, so a healthy cycle is fast and only a real outage pays
-    the full set of timeouts. Latency = the connect that answered."""
+    as ANY target answers WITHIN `timeout`, so a connection that can only respond
+    slower than the cutoff does not count as answering. Latency = the connect that answered."""
     for host, port in targets:
         start = time.monotonic()
         try:
-            with socket.create_connection((host, port), timeout=TIMEOUT):
+            with socket.create_connection((host, port), timeout=timeout):
                 pass
             return True, (time.monotonic() - start) * 1000.0
         except (OSError, UnicodeError):
@@ -137,17 +143,17 @@ def check_once(targets=TARGETS):
     return False, None
 
 
-def check_connectivity(targets=TARGETS):
-    """check_once() with a fast retry burst, so a single dropped packet is not
-    logged as an outage. Returns (up: bool, latency_ms: float|None)."""
-    up, latency = check_once(targets)
+def check_connectivity(targets=TARGETS, timeout=TIMEOUT):
+    """check_once() with a fast retry burst, so a single dropped packet (or one slow blip past
+    the cutoff) is not logged as an outage. Returns (up: bool, latency_ms: float|None)."""
+    up, latency = check_once(targets, timeout)
     if up:
         return True, latency
     for _ in range(CONFIRM_RETRIES):
         if not _running:
             break
         time.sleep(RETRY_GAP)
-        up, latency = check_once(targets)
+        up, latency = check_once(targets, timeout)
         if up:
             return True, latency
     return False, None
@@ -424,6 +430,10 @@ def cfg_brownout_ms(conn):
     return _cfg(conn, "brownout_ms", BROWNOUT_MS, CFG_BROWNOUT_OPTIONS)
 
 
+def cfg_timeout_ms(conn):
+    return _cfg(conn, "timeout_ms", TIMEOUT_MS_DEFAULT, CFG_TIMEOUT_OPTIONS)
+
+
 def cfg_targets(conn):
     """Effective probe targets: a validated custom list from meta if present, else the
     built-in TARGETS. Any malformed value falls back to the defaults so the loop is safe."""
@@ -651,6 +661,7 @@ def main():
         now = _now()
         interval = cfg_interval(conn)
         targets = cfg_targets(conn)
+        timeout_s = cfg_timeout_ms(conn) / 1000.0   # response cutoff: must answer within this
         alerts = alert_cfg(conn)
 
         # --- pause handling (sentinel file toggled by the dashboard; may auto-expire) ---
@@ -677,7 +688,7 @@ def main():
             log_event(conn, now, "gap", str(now - prev_ts))
 
         # --- probes ---
-        up, latency = check_connectivity(targets)     # confirmed (retry burst on failure)
+        up, latency = check_connectivity(targets, timeout_s)   # confirmed (retry burst on failure)
         gw = True if up else probe_gateway(gw_ip)     # internet up => LAN up
         net_cause = None if up else classify_net_cause(gw)
 

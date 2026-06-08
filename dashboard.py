@@ -49,10 +49,11 @@ CFG_OPTIONS = {
     "outage_retention_days": (0, 90, 180, 365),    # 0 = forever
     "degraded_ms": (0, 150, 250, 400, 600),        # 0 = off
     "brownout_ms": (0, 500, 750, 1000, 1500),      # 0 = off
+    "timeout_ms": (1000, 1500, 2000, 3000),        # response cutoff: answer within this or it's down
 }
 CFG_DEFAULT = {"interval": INTERVAL, "retention_days": RETENTION_DAYS,
                "outage_retention_days": OUTAGE_RETENTION_DAYS, "degraded_ms": DEGRADED_MS,
-               "brownout_ms": BROWNOUT_MS}
+               "brownout_ms": BROWNOUT_MS, "timeout_ms": 1000}
 
 ALERT_TYPES = ("ntfy", "discord", "webhook")
 # Host label for a custom target: a DNS hostname or IPv4 (no schemes, paths, or spaces).
@@ -202,7 +203,16 @@ def get_gaps(conn, start, end, now):
 
 def get_live(conn, now):
     interval = cfg_get(conn, "interval")
+    # A FAILING check cycle can legitimately take the full probe budget (all targets time out and
+    # retry, ~40-50s) while the connection is merely struggling, not gone. Treat the latest reading
+    # as stale ("No signal") only once it is older than the monitor's own no-data gap threshold, so
+    # a slow cycle shows the real up/down/slow state instead of falsely flipping to "No signal".
     stale_after = max(30, interval * 6)
+    try:
+        import monitor as _mon
+        stale_after = max(stale_after, int(_mon.gap_threshold(interval, len(_mon.cfg_targets(conn)))) + interval)
+    except Exception:
+        pass
     latest = conn.execute(
         "SELECT ts, up, latency_ms, dns FROM checks ORDER BY ts DESC LIMIT 1"
     ).fetchone()
@@ -446,6 +456,7 @@ def build_meta(conn):
         "outage_retention_days": cfg_get(conn, "outage_retention_days"),
         "degraded_ms": cfg_get(conn, "degraded_ms"),
         "brownout_ms": cfg_get(conn, "brownout_ms"),
+        "timeout_ms": cfg_get(conn, "timeout_ms"),
         "schema_version": m("schema_version", "1"),
         "gateway": (m("gateway") or None),
         "interval": cfg_get(conn, "interval"),

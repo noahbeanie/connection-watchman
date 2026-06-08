@@ -64,7 +64,10 @@ Every `UPTIME_INTERVAL` seconds (default 15s) the monitor measures two things:
    Latency = the connect that answered. TCP-connect is used instead of ICMP ping
    because it needs no root and isn't blocked/rate-limited. **A failed check is
    retried several times over a few seconds before it counts as down**, so a
-   single dropped packet (or one bad port) is never an outage.
+   single dropped packet (or one bad port) is never an outage. A server must also
+   answer within the **response cutoff** (a dashboard setting, default 1 second):
+   a connection that is technically reachable but too slow to respond counts as
+   down, so a severe slowdown registers as a real outage instead of looking "up".
 2. **DNS** (a *separate* signal that does **not** affect the uptime score) — can a
    name be resolved? Checked first via the system resolver (what your devices
    use, usually the router) and, if that fails, directly against several
@@ -204,7 +207,7 @@ then `sudo systemctl daemon-reload && sudo systemctl restart uptime-monitor`.
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `UPTIME_INTERVAL` | `15`    | Seconds between checks. Lower = finer detail, more rows. |
-| `UPTIME_TIMEOUT`  | `1.5`   | Internet connect timeout (seconds). |
+| `UPTIME_TIMEOUT`  | `1.5`   | Upper bound for a connect attempt (seconds), used for internal timing. The live **response cutoff** (how fast a server must answer to count as up; default 1.0s) is set in the dashboard under Data & tools. |
 | `UPTIME_CONFIRM_RETRIES` | `3` | Extra connectivity re-checks before a cycle counts as down (debounce). |
 | `UPTIME_RETRY_GAP` | `1`    | Seconds between those confirmation re-checks. |
 | `UPTIME_DEGRADED_MS` | `250` | Latency (ms) over which a check counts as "slow but up". `0` disables the slow signal. Also settable in the dashboard. |
