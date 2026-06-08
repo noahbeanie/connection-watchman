@@ -10,8 +10,13 @@ log written by monitor.py and serves:
   - "/api/meta"               first record, db size, paused state, retention, gateway
   - "/api/export/checks.csv"  streamed raw check log (range or all-time)
   - "/api/export/outages.csv" streamed outage log
-  - POST "/api/pause"         {paused: bool} -> toggles the PAUSED sentinel
+  - POST "/api/pause"         {paused: bool, minutes?: int} -> toggles the PAUSED sentinel
   - POST "/api/reset"         {confirm:"RESET"} -> wipes the database (guarded)
+  - POST "/api/config"        {interval?, retention_days?, degraded_ms?, ...} -> live settings
+  - POST "/api/alerts"        {type, url, recovery, degraded} -> notification settings
+  - POST "/api/alert/test"    sends a test notification to the configured channel
+  - POST "/api/targets"       {targets:[{host,port}]} -> custom probe targets ([] = defaults)
+  - POST "/api/outage/note"   {id, note} ; POST "/api/outage/delete" {id}
 
 Open it from any device on your LAN at  http://<pi-ip>:8080
 It works even while the internet is down (charts are inline SVG, no CDN).
@@ -19,6 +24,7 @@ It works even while the internet is down (charts are inline SVG, no CDN).
 
 import json
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -31,6 +37,8 @@ PORT = int(os.environ.get("UPTIME_PORT", "8080"))
 INTERVAL = float(os.environ.get("UPTIME_INTERVAL", "15"))
 RETENTION_DAYS = int(os.environ.get("UPTIME_RETENTION_DAYS", "365"))
 OUTAGE_RETENTION_DAYS = int(os.environ.get("UPTIME_OUTAGE_RETENTION_DAYS", "0"))  # 0 = forever
+DEGRADED_MS = int(os.environ.get("UPTIME_DEGRADED_MS", "250"))   # latency over this = "slow"; 0 = off
+BROWNOUT_MS = int(os.environ.get("UPTIME_BROWNOUT_MS", "750"))    # sustained latency over this = a brownout event
 PAUSE_FILE = os.path.join(BASE, "PAUSED")
 
 # User-adjustable settings persisted in the meta table (set via /api/config; the monitor
@@ -39,8 +47,21 @@ CFG_OPTIONS = {
     "interval": (5, 10, 15, 30, 60),
     "retention_days": (0, 30, 90, 180, 365),       # 0 = forever
     "outage_retention_days": (0, 90, 180, 365),    # 0 = forever
+    "degraded_ms": (0, 150, 250, 400, 600),        # 0 = off
+    "brownout_ms": (0, 500, 750, 1000, 1500),      # 0 = off
 }
-CFG_DEFAULT = {"interval": INTERVAL, "retention_days": RETENTION_DAYS, "outage_retention_days": OUTAGE_RETENTION_DAYS}
+CFG_DEFAULT = {"interval": INTERVAL, "retention_days": RETENTION_DAYS,
+               "outage_retention_days": OUTAGE_RETENTION_DAYS, "degraded_ms": DEGRADED_MS,
+               "brownout_ms": BROWNOUT_MS}
+
+ALERT_TYPES = ("ntfy", "discord", "webhook")
+# Host label for a custom target: a DNS hostname or IPv4 (no schemes, paths, or spaces).
+# Enforces DNS limits (total <= 253, each label <= 63, no leading/trailing hyphen) so an
+# over-long label can never reach the monitor's socket layer and raise UnicodeError there.
+TARGET_HOST_RE = re.compile(
+    r"^(?=.{1,253}$)([A-Za-z0-9]([A-Za-z0-9\-]{0,61}[A-Za-z0-9])?\.)*"
+    r"[A-Za-z0-9]([A-Za-z0-9\-]{0,61}[A-Za-z0-9])?$"
+)
 
 
 def cfg_get(conn, key):
@@ -242,6 +263,16 @@ def build_range(conn, start, end):
     total, up = s["total"], s["up"]
     sample_pct = (up / total * 100.0) if total else None
 
+    # "Slow but up": checks that connected yet exceeded the degraded-latency threshold.
+    degraded_ms = cfg_get(conn, "degraded_ms")
+    deg_checks = 0
+    if degraded_ms > 0:
+        deg_checks = conn.execute(
+            "SELECT COUNT(*) c FROM checks WHERE ts>=? AND ts<? AND up=1 "
+            "AND latency_ms IS NOT NULL AND latency_ms>?",
+            (start, end, degraded_ms),
+        ).fetchone()["c"]
+
     # per-bucket data (drives the optional latency overlay + scrub latency lookup)
     buckets = []
     for row in conn.execute(
@@ -282,8 +313,8 @@ def build_range(conn, start, end):
     ).fetchall()
 
     outages = []
-    net_iv, dns_iv = [], []
-    net_count, dns_count = 0, 0
+    net_iv, dns_iv, brown_iv = [], [], []
+    net_count, dns_count, brown_count = 0, 0, 0
     for row in raw:
         kind = row["kind"] or "net"
         ongoing = row["end_ts"] is None
@@ -300,6 +331,10 @@ def build_range(conn, start, end):
             dns_count += 1
             if b > a:
                 dns_iv.append((a, b))
+        elif kind == "slow":           # brownout: up but severely slow; never counts as downtime
+            brown_count += 1
+            if b > a:
+                brown_iv.append((a, b))
         else:
             net_count += 1
             if b > a:
@@ -312,8 +347,15 @@ def build_range(conn, start, end):
     down_iv = _subtract(_merge(net_iv), gap_merged)      # connectivity time minus gaps
     down_seconds = _total(down_iv)
     dns_seconds = _total(_subtract(_merge(dns_iv), gap_merged))
+    brownout_seconds = _total(_subtract(_merge(brown_iv), gap_merged))
     monitored = max(0, window - gap_seconds)
     availability = ((monitored - down_seconds) / monitored * 100.0) if monitored > 0 else None
+
+    # Degraded time = the fraction of online checks that were slow, applied to online time
+    # (uptime = monitored minus the outage time). A quality signal; never counts as downtime.
+    uptime_seconds = max(0, monitored - down_seconds)
+    degraded_seconds = round(uptime_seconds * deg_checks / up) if (degraded_ms > 0 and up > 0) else 0
+    degraded_pct = round(deg_checks / up * 100.0, 1) if (degraded_ms > 0 and up > 0) else None
 
     return {
         "start": start, "end": end, "now": now, "bucket": bucket,
@@ -330,6 +372,13 @@ def build_range(conn, start, end):
             "dns_events": dns_count,                # separate DNS signal (excluded from uptime)
             "dns_seconds": dns_seconds,
             "dns_h": fmt_dur(dns_seconds),
+            "brownout_count": brown_count,          # sustained slow-but-up events (not downtime)
+            "brownout_seconds": brownout_seconds,
+            "brownout_h": fmt_dur(brownout_seconds),
+            "degraded_seconds": degraded_seconds,   # "slow but up" quality signal (not downtime)
+            "degraded_h": fmt_dur(degraded_seconds),
+            "degraded_pct": degraded_pct,
+            "degraded_ms": degraded_ms,             # the active slow threshold (0 = off)
             "avg_lat": round(s["avg_lat"], 1) if s["avg_lat"] is not None else None,
             "min_lat": round(s["min_lat"], 1) if s["min_lat"] is not None else None,
             "max_lat": round(s["max_lat"], 1) if s["max_lat"] is not None else None,
@@ -338,6 +387,28 @@ def build_range(conn, start, end):
         "outages": outages[:200],
         "gaps": [{"start": g[0], "end": g[1], "kind": g[2]} for g in gaps],
     }
+
+
+def pause_status():
+    """(paused: bool, pause_until: int|None) from the sentinel file. An empty file is an
+    indefinite pause; a numeric file is a timed pause (reported until it elapses, after
+    which the monitor clears it)."""
+    try:
+        with open(PAUSE_FILE) as f:
+            raw = f.read().strip()
+    except OSError:
+        return (False, None)
+    if not raw:
+        return (True, None)
+    try:
+        until = int(float(raw))
+    except ValueError:
+        return (True, None)
+    if until <= 0:
+        return (True, None)
+    if int(time.time()) >= until:
+        return (False, None)
+    return (True, until)
 
 
 def build_meta(conn):
@@ -356,27 +427,38 @@ def build_meta(conn):
     # Probe configuration, surfaced for the technical Data & tools panel. Imported
     # lazily and guarded so the dashboard never breaks if monitor.py is unavailable
     # (module-level import is side-effect-free; the daemon loop is under __main__).
+    # Targets reflect the effective list (a custom set from meta, or the built-in default).
     try:
         import monitor as _mon
-        targets = sorted({h for h, _p in _mon.TARGETS})
-        target_ports = sorted({p for _h, p in _mon.TARGETS})
+        targets = [{"host": h, "port": p} for h, p in _mon.cfg_targets(conn)]
         resolvers = list(_mon.DNS_RESOLVERS)
         dns_host = _mon.DNS_PROBE_HOST
     except Exception:
-        targets, target_ports, resolvers, dns_host = [], [], [], None
+        targets, resolvers, dns_host = [], [], None
+    targets_custom = bool(m("cfg_targets"))
+    paused, pause_until = pause_status()
     return {
         "first_ts": first_ts(conn),
         "db_size_bytes": size,
-        "paused": os.path.exists(PAUSE_FILE),
+        "paused": paused,
+        "pause_until": pause_until,
         "retention_days": cfg_get(conn, "retention_days"),
         "outage_retention_days": cfg_get(conn, "outage_retention_days"),
+        "degraded_ms": cfg_get(conn, "degraded_ms"),
+        "brownout_ms": cfg_get(conn, "brownout_ms"),
         "schema_version": m("schema_version", "1"),
         "gateway": (m("gateway") or None),
         "interval": cfg_get(conn, "interval"),
         "targets": targets,
-        "target_ports": target_ports,
+        "targets_custom": targets_custom,
         "resolvers": resolvers,
         "dns_host": dns_host,
+        "alerts": {
+            "type": m("cfg_alert_type", "ntfy"),
+            "url": m("cfg_alert_url", "") or "",
+            "recovery": (m("cfg_alert_recovery", "1") or "1") == "1",
+            "degraded": (m("cfg_alert_degraded", "0") or "0") == "1",
+        },
         "now": int(time.time()),
     }
 
@@ -595,13 +677,24 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/pause":
                 want = bool(data.get("paused"))
                 if want:
-                    open(PAUSE_FILE, "w").close()
+                    # Optional timed pause: an integer "minutes" writes a resume epoch the
+                    # monitor honors and auto-clears. No minutes (or 0) is an indefinite pause.
+                    try:
+                        mins = int(data.get("minutes") or 0)
+                    except (TypeError, ValueError):
+                        mins = 0
+                    mins = max(0, min(mins, 7 * 24 * 60))   # cap at one week
+                    until = int(time.time()) + mins * 60 if mins > 0 else None
+                    with open(PAUSE_FILE, "w") as f:
+                        if until:
+                            f.write(str(until))
+                    self._send(200, json.dumps({"paused": True, "pause_until": until}), "application/json")
                 else:
                     try:
                         os.remove(PAUSE_FILE)
                     except FileNotFoundError:
                         pass
-                self._send(200, json.dumps({"paused": want}), "application/json")
+                    self._send(200, json.dumps({"paused": False, "pause_until": None}), "application/json")
 
             elif parsed.path == "/api/reset":
                 if data.get("confirm") != "RESET":
@@ -689,7 +782,7 @@ class Handler(BaseHTTPRequestHandler):
                 conn = db_rw()
                 try:
                     conn.execute("BEGIN IMMEDIATE")
-                    row = conn.execute("SELECT start_ts, end_ts FROM outages WHERE id=?", (oid,)).fetchone()
+                    row = conn.execute("SELECT start_ts, end_ts, kind FROM outages WHERE id=?", (oid,)).fetchone()
                     if row is None:
                         conn.execute("COMMIT")
                         self._send(404, json.dumps({"error": "outage not found"}), "application/json")
@@ -698,16 +791,99 @@ class Handler(BaseHTTPRequestHandler):
                         conn.execute("COMMIT")
                         self._send(400, json.dumps({"error": "can't delete an ongoing outage"}), "application/json")
                         return
-                    # The internet was actually fine (e.g. a modem reset): mark the whole window
-                    # back online AND clear its latency samples. Clearing matters because a partial
-                    # outage's surviving connects sit near the timeout; left in place they'd linger
-                    # as a hidden-spike gap. With no samples, the latency chart fills the span with
-                    # an estimated line instead. Then drop the outage entirely.
-                    conn.execute("UPDATE checks SET up=1, latency_ms=NULL WHERE ts>=? AND ts<?",
-                                 (row["start_ts"], row["end_ts"]))
+                    # Only a connectivity outage means "the internet was actually fine" (e.g. a modem
+                    # reset): mark that window back online AND clear its latency samples (a partial
+                    # outage's survivors sit near the timeout; cleared, the chart fills an estimated
+                    # line instead of lingering as a hidden-spike gap). A brownout/DNS event was up
+                    # the whole time, so deleting it just drops the event row, never rewriting data.
+                    if (row["kind"] or "net") == "net":
+                        conn.execute("UPDATE checks SET up=1, latency_ms=NULL WHERE ts>=? AND ts<?",
+                                     (row["start_ts"], row["end_ts"]))
                     conn.execute("DELETE FROM outages WHERE id=?", (oid,))
                     conn.execute("COMMIT")
                     self._send(200, json.dumps({"ok": True, "id": oid}), "application/json")
+                except sqlite3.OperationalError as e:
+                    self._send(503, json.dumps({"error": f"database busy: {e}"}), "application/json")
+                finally:
+                    conn.close()
+            elif parsed.path == "/api/alerts":
+                atype = str(data.get("type", "ntfy"))
+                if atype not in ALERT_TYPES:
+                    self._send(400, json.dumps({"error": "invalid alert type"}), "application/json")
+                    return
+                url = data.get("url")
+                url = "" if url is None else str(url).strip()[:500]
+                if url:
+                    pu = urlparse(url)
+                    if pu.scheme not in ("http", "https") or not pu.netloc:
+                        self._send(400, json.dumps({"error": "URL must start with http:// or https://"}), "application/json")
+                        return
+                recovery = "1" if data.get("recovery", True) else "0"
+                degraded = "1" if data.get("degraded", False) else "0"
+                conn = db_rw()
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    for k, v in (("cfg_alert_type", atype), ("cfg_alert_url", url),
+                                 ("cfg_alert_recovery", recovery), ("cfg_alert_degraded", degraded)):
+                        conn.execute("INSERT INTO meta (k, v) VALUES (?, ?) "
+                                     "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))
+                    conn.execute("COMMIT")
+                    self._send(200, json.dumps({"ok": True}), "application/json")
+                except sqlite3.OperationalError as e:
+                    self._send(503, json.dumps({"error": f"database busy: {e}"}), "application/json")
+                finally:
+                    conn.close()
+            elif parsed.path == "/api/alert/test":
+                conn = db()
+                try:
+                    def mv(k, d=""):
+                        r = conn.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
+                        return (r["v"] if r else d) or d
+                    url = mv("cfg_alert_url", "")
+                    atype = mv("cfg_alert_type", "ntfy")
+                finally:
+                    conn.close()
+                if not url:
+                    self._send(400, json.dumps({"error": "Add a notification URL first"}), "application/json")
+                    return
+                try:
+                    import monitor as _mon
+                    ok = _mon.send_alert(url, atype, "Connection Watchman",
+                                         "Test alert: your Connection Watchman notifications are working.")
+                except Exception as e:
+                    self._send(200, json.dumps({"ok": False, "error": str(e)}), "application/json")
+                    return
+                self._send(200, json.dumps({"ok": bool(ok)}), "application/json")
+            elif parsed.path == "/api/targets":
+                items = data.get("targets")
+                if not isinstance(items, list):
+                    self._send(400, json.dumps({"error": "targets must be a list"}), "application/json")
+                    return
+                cleaned = []
+                for it in items:
+                    try:
+                        host = str(it.get("host", "")).strip() if isinstance(it, dict) else str(it[0]).strip()
+                        port = int(it.get("port") if isinstance(it, dict) else it[1])
+                    except (TypeError, ValueError, IndexError, AttributeError):
+                        self._send(400, json.dumps({"error": "each target needs a host and port"}), "application/json")
+                        return
+                    if not TARGET_HOST_RE.match(host) or not (0 < port < 65536):
+                        self._send(400, json.dumps({"error": f"invalid target {host}:{port}"}), "application/json")
+                        return
+                    cleaned.append([host, port])
+                if len(cleaned) > 16:
+                    self._send(400, json.dumps({"error": "at most 16 targets"}), "application/json")
+                    return
+                conn = db_rw()
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    if cleaned:
+                        conn.execute("INSERT INTO meta (k, v) VALUES ('cfg_targets', ?) "
+                                     "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (json.dumps(cleaned),))
+                    else:
+                        conn.execute("DELETE FROM meta WHERE k='cfg_targets'")   # empty = restore defaults
+                    conn.execute("COMMIT")
+                    self._send(200, json.dumps({"ok": True, "count": len(cleaned)}), "application/json")
                 except sqlite3.OperationalError as e:
                     self._send(503, json.dumps({"error": f"database busy: {e}"}), "application/json")
                 finally:

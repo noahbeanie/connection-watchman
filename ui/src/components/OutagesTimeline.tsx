@@ -7,7 +7,10 @@ import type { Outage } from "@/lib/types"
 
 const causeColor: Record<string, string> = {
   isp: "var(--orange)", local: "var(--down)", dns: "var(--primary)", unknown: "var(--muted-foreground)",
+  slow: "var(--amber)",
 }
+const BROWNOUT_DESC =
+  "A brownout: the connection stayed up but was very slow (latency above your brownout threshold) for a sustained stretch. It is tracked as its own event and never counted as downtime."
 
 export function OutagesTimeline({ outages, onSaveNote, onDelete }: {
   outages: Outage[]
@@ -29,7 +32,7 @@ export function OutagesTimeline({ outages, onSaveNote, onDelete }: {
         <span>Duration</span>
       </div>
       <ol className="relative ml-1 space-y-4 border-l border-border/60 pl-5">
-        {outages.slice(0, 60).map((o) => {
+        {outages.map((o) => {
           const c = causeColor[o.cause] ?? causeColor.unknown
           const editing = noteId === o.id
           const confirming = confirmId === o.id
@@ -42,7 +45,7 @@ export function OutagesTimeline({ outages, onSaveNote, onDelete }: {
               </div>
               <div className="mt-0.5 flex items-center justify-between gap-2 text-xs text-muted-foreground">
                 <div className="flex flex-wrap items-center gap-2">
-                  <InfoTip label={CAUSE_DESC[o.cause] ?? CAUSE_DESC.unknown} className="cursor-help">
+                  <InfoTip label={o.kind === "slow" ? BROWNOUT_DESC : (CAUSE_DESC[o.cause] ?? CAUSE_DESC.unknown)} className="cursor-help">
                     <span className="font-medium" style={{ color: c }}>{CAUSE_LABEL[o.cause] ?? o.cause}</span>
                   </InfoTip>
                   {o.ongoing ? (
@@ -60,7 +63,7 @@ export function OutagesTimeline({ outages, onSaveNote, onDelete }: {
                     className={`rounded p-1 transition hover:bg-muted ${o.note ? "text-primary" : "text-muted-foreground hover:text-foreground"}`}>
                     <StickyNote className="size-3.5" />
                   </button>
-                  {!o.ongoing && (
+                  {!o.ongoing && o.kind === "net" && (
                     <button type="button" onClick={() => { setNoteId(null); setConfirmId(confirming ? null : o.id) }}
                       title="Delete outage" aria-label="Delete outage"
                       className="rounded p-1 text-muted-foreground transition hover:bg-muted hover:text-[var(--down)]">

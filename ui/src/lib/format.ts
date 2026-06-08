@@ -10,7 +10,7 @@ export const PRESETS = [
 ]
 
 export const CAUSE_LABEL: Record<string, string> = {
-  isp: "ISP / Internet", local: "Your network", dns: "DNS", unknown: "Unknown",
+  isp: "ISP / Internet", local: "Your network", dns: "DNS", unknown: "Unknown", slow: "Brownout",
 }
 
 // Very short, plain-English reason a connectivity stretch went down, shown when you
@@ -20,6 +20,7 @@ export const CAUSE_EXPLAIN: Record<string, string> = {
   local: "Your router or home network went down.",
   unknown: "The connection dropped, cause unknown.",
   dns: "DNS name lookups were failing.",
+  slow: "The connection stayed up but was very slow (a brownout).",
 }
 
 // Friendly names for well-known public DNS resolvers, shown in the DNS servers card.
@@ -121,6 +122,17 @@ export function uptimeColor(p: number | null): string {
   if (p >= 95) return "oklch(0.84 0.14 92)"
   if (p > 0) return "oklch(0.77 0.16 58)"
   return "var(--down)"
+}
+
+// Plain-language grade for an availability %, with a matching color. Gives the gauge a
+// reference so a glance answers "is this good?" instead of leaving a bare number. Aligned
+// to the gauge's arc thresholds (Excellent >= 99.5, Good >= 98, Fair >= 95, else Poor).
+export function uptimeGrade(p: number | null): { label: string; color: string } | null {
+  if (p == null) return null
+  if (p >= 99.5) return { label: "Excellent", color: "var(--up)" }
+  if (p >= 98) return { label: "Good", color: "color-mix(in oklab, var(--up) 55%, var(--amber))" }
+  if (p >= 95) return { label: "Fair", color: "var(--amber)" }
+  return { label: "Poor", color: "var(--down)" }
 }
 
 export function rangeWord(presetId: string): string {

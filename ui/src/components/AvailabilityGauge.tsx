@@ -1,12 +1,12 @@
 import { useState } from "react"
-import { pctText, rangeWord } from "@/lib/format"
+import { pctText, rangeWord, uptimeGrade } from "@/lib/format"
 
-// Continuous green -> yellow -> red by availability. Tunable thresholds.
-// Pure green only when essentially perfect; below that the hue shifts visibly so
-// any time under 100% reads differently (e.g. 99.36% lands ~60% green / yellow-green).
-const GREEN_AT = 99.9 // at or above this: solid green
-const YELLOW_AT = 98.5 // pure yellow
-const RED_AT = 95 // at or below this: solid red
+// Continuous green -> yellow -> red by availability. Tunable thresholds, calibrated for real
+// home internet (three-nines is a datacenter SLA, not a home line): a solid connection can
+// actually read green, while a genuinely flaky one still shifts toward amber/red.
+const GREEN_AT = 99.5 // at or above this: solid green ("Excellent")
+const YELLOW_AT = 98 // pure yellow ("Good"/"Fair" boundary)
+const RED_AT = 95 // at or below this: solid red ("Poor")
 function arcColor(pct: number | null) {
   if (pct == null) return "var(--muted-foreground)"
   if (pct >= GREEN_AT) return "var(--up)"
@@ -28,6 +28,7 @@ const C = 2 * Math.PI * R
 
 export function AvailabilityGauge({ pct, presetId }: { pct: number | null; presetId: string }) {
   const color = arcColor(pct)
+  const grade = uptimeGrade(pct)
   const core = `color-mix(in oklab, ${color} 32%, white)` // hot, near-white filament
   const frac = Math.max(0, Math.min(1, (pct ?? 0) / 100))
   const offset = C * (1 - frac)
@@ -97,7 +98,15 @@ export function AvailabilityGauge({ pct, presetId }: { pct: number | null; prese
           >
             {pctText(pct)}
           </div>
-          <div className="mt-1.5 text-xs font-medium text-foreground">Uptime · {rangeWord(presetId)}</div>
+          {grade && (
+            <div
+              className="mt-1 text-[0.7rem] font-semibold uppercase tracking-wider"
+              style={{ color: grade.color }}
+            >
+              {grade.label}
+            </div>
+          )}
+          <div className="mt-1 text-xs font-medium text-foreground">Uptime · {rangeWord(presetId)}</div>
         </div>
       </div>
     </div>

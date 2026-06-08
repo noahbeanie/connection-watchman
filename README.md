@@ -106,21 +106,57 @@ dashboard, never counted as downtime).
 
 ## What you'll see on the dashboard
 
-- **A radial uptime gauge** for the selected range, with your current unbroken
-  up/down streak.
-- **A latency area chart** that stays lively even when uptime is a flat 100%.
-- **A status-page tracker bar**: green where connectivity was up, red where it
-  dropped, grey for no-data gaps. Hover any segment for its uptime and latency.
-- **KPI tiles**: uptime %, downtime, connectivity outage count, and average
-  latency with a sparkline.
-- **Recent outages** with a hover legend explaining each cause, plus a separate
-  **DNS** panel that reports name-resolution hiccups without counting them as
-  downtime.
-- **Range buttons**: 1H / 6H / 24H / 7D / 30D / 6M / 1Y / All. Ranges longer than
-  your recorded history are greyed out, and on first load the longest available
-  range is auto-selected.
-- **Data & tools**: live database size, CSV export of checks and outages,
-  pause/resume monitoring, and a guarded "reset all data".
+- **A radial uptime gauge** for the selected range, graded Excellent / Good / Fair /
+  Poor so a glance tells you whether the number is healthy (not just what it is).
+- **A latency area chart** (lower is faster) with a shaded "slow" zone above your
+  degraded threshold, red bands over outages, and amber bands over brownouts.
+- **A status-page tracker bar**: green where connectivity was up, amber for partial,
+  red where it dropped, grey for no-data gaps. Hover any segment for its uptime,
+  cause, and latency.
+- **KPI tiles** for the selected range: current uptime streak, downtime, time spent
+  slow-but-up, and the connectivity outage count.
+- **Outages for the selected range** (the list follows the range you pick) with a
+  hover legend explaining each cause, per-outage notes and delete. **Brownouts** (the
+  line stayed up but was severely slow for a sustained stretch) appear here in amber as
+  their own events, and never count as downtime. A separate **DNS** panel reports
+  name-resolution hiccups, also never counted as downtime.
+- **Range buttons** (1H / 6H / 24H / 7D / 30D / 6M / 1Y / All) and a custom date range.
+  Ranges longer than your recorded history are greyed out; on first load the longest
+  available range is auto-selected.
+- **A printable report** of the selected period's outages, to save as PDF or hand to
+  your ISP.
+- **Data & tools**: live database size, configurable check interval / retention / slow
+  threshold, notifications, custom probe targets, CSV export, pause (timed or until you
+  resume), and a guarded "reset all data".
+
+## Notifications (optional)
+
+By default the dashboard just logs. Turn on alerts under **Data & tools -> Alerts** to be
+told when things change. Pick a channel and paste its URL:
+
+- **ntfy** (free, no account): install the ntfy app, pick any topic name, and use
+  `https://ntfy.sh/your-topic`.
+- **Discord**: a channel webhook URL.
+- **Webhook**: any endpoint; it receives `{"title", "message"}` as JSON.
+
+Two alert types, each independently toggleable:
+
+- **Outage recovery** (on by default): sent when the internet comes back, with the outage's
+  duration and cause. A recovery alert is always deliverable, because the connection is back
+  by the time it sends. (An alert cannot be delivered *while* the internet is actually down,
+  which is why there is no "you are down right now" alert from a single box.)
+- **Slow connection** (off by default): sent when latency stays above your slow threshold for
+  several checks in a row, and again when it returns to normal.
+
+Use **Test** to fire a sample notification and confirm the channel works. Everything runs on
+the Python standard library, so there is still nothing to `pip install`.
+
+## Custom targets (optional)
+
+"Up" means *any* reachability target answered. The defaults are Cloudflare, Google, and Quad9
+on ports 443 and 53. Under **Data & tools -> Targets** you can replace them with your own
+`host:port` list (for example, to also watch a specific service you care about) or reset to the
+defaults. The monitor picks up changes within a cycle.
 
 ## Files
 
@@ -157,7 +193,8 @@ journalctl -u uptime-monitor -f      # watch outages + causes live
 Stop: `sudo systemctl stop uptime-monitor uptime-dashboard`.
 You can also pause/resume from the dashboard's **Data & tools** panel (it leaves
 a `PAUSED` file in the project dir; paused spans show as grey no-data, never as
-downtime).
+downtime). A pause can be timed (one hour, four hours, or a day) and resumes on its
+own, or indefinite until you click Resume.
 
 ## Tuning (optional)
 
@@ -170,6 +207,8 @@ then `sudo systemctl daemon-reload && sudo systemctl restart uptime-monitor`.
 | `UPTIME_TIMEOUT`  | `1.5`   | Internet connect timeout (seconds). |
 | `UPTIME_CONFIRM_RETRIES` | `3` | Extra connectivity re-checks before a cycle counts as down (debounce). |
 | `UPTIME_RETRY_GAP` | `1`    | Seconds between those confirmation re-checks. |
+| `UPTIME_DEGRADED_MS` | `250` | Latency (ms) over which a check counts as "slow but up". `0` disables the slow signal. Also settable in the dashboard. |
+| `UPTIME_BROWNOUT_MS` | `750` | Sustained latency (ms) above which the connection is logged as a "brownout" event (up but very slow). `0` disables it. Also settable in the dashboard. |
 | `UPTIME_GATEWAY`  | *(auto)* | Your router's IP, used for the cause probe. Auto-discovered from the default route; set it explicitly (e.g. `192.168.68.1`) if discovery is wrong (multiple interfaces / VPN). |
 | `UPTIME_DNS_HOST` | `example.com` | Name resolved for the DNS probe. |
 | `UPTIME_RETENTION_DAYS` | `365` | Raw per-check rows older than this are trimmed hourly. |

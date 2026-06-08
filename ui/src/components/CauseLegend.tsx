@@ -22,6 +22,12 @@ const CAUSES = [
     color: "var(--muted-foreground)",
     desc: "The connection was down but the cause could not be pinned down, for example when the router's address was not known at the moment of the check.",
   },
+  {
+    key: "slow",
+    label: "Brownout",
+    color: "var(--amber)",
+    desc: "Not an outage: the connection stayed up but was very slow (latency above your brownout threshold) for a sustained stretch. Tracked as its own event and never counted as downtime.",
+  },
 ]
 
 // Cause key -> description, available for reuse elsewhere.

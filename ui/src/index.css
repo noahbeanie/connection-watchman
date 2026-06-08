@@ -162,3 +162,21 @@
   50%      { opacity: 0.7; }
 }
 .gauge-glow { animation: gaugeGlow 3.6s ease-in-out infinite; }
+
+/* Header wordmark: black interior, thin light-grey outline, soft white glow. */
+.wordmark {
+  font-family: 'Space Grotesk Variable', sans-serif;
+  color: #000;
+  -webkit-text-fill-color: #000;
+  -webkit-text-stroke: 1px #c8c8ce;
+  text-shadow: 0 0 6px rgba(255, 255, 255, 0.17), 0 0 16px rgba(255, 255, 255, 0.08);
+}
+
+/* Printable report: hide the live dashboard + toolbar, leave only the report sheet so
+   "Print / Save as PDF" produces a clean document. */
+@media print {
+  .no-print { display: none !important; }
+  .app-shell { display: none !important; }
+  .report-sheet { position: static !important; overflow: visible !important; }
+  body { background: white !important; }
+}
