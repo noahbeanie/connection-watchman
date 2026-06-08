@@ -49,13 +49,32 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
   const fence = latencyFence(
     data.buckets.filter((b) => b.total > 0 && b.up === b.total && b.avg != null).map((b) => b.avg as number),
   )
-  const points = data.buckets.map((b) => ({
-    t: b.t + data.bucket / 2,
-    avg: b.up === b.total && b.avg != null && b.avg <= fence ? b.avg : null,
-    up: b.up,
-    total: b.total,
-  }))
-  const valued = points.filter((p): p is { t: number; avg: number; up: number; total: number } => p.avg != null)
+  // Real latency = a fully-up bucket with a sample inside the spike fence.
+  const reals = data.buckets.map((b) =>
+    b.up === b.total && b.avg != null && b.avg <= fence ? b.avg : null)
+  const mid = (i: number) => data.buckets[i].t + data.bucket / 2
+  // A fully-up bucket with NO latency sample is a window whose outage was deleted (its down
+  // checks were reverted to online). Estimate its latency by interpolating the nearest good
+  // buckets on either side, so the line fills in as a normal segment instead of gapping.
+  const points = data.buckets.map((b, i) => {
+    const t = mid(i)
+    if (reals[i] != null) return { t, avg: reals[i], up: b.up, total: b.total, est: false }
+    if (!(b.total > 0 && b.up === b.total && b.avg == null)) {
+      return { t, avg: null as number | null, up: b.up, total: b.total, est: false }
+    }
+    let lo = i - 1
+    while (lo >= 0 && reals[lo] == null) lo--
+    let hi = i + 1
+    while (hi < reals.length && reals[hi] == null) hi++
+    const loV = lo >= 0 ? reals[lo] : null
+    const hiV = hi < reals.length ? reals[hi] : null
+    let est: number | null = null
+    if (loV != null && hiV != null) est = loV + (hiV - loV) * ((t - mid(lo)) / (mid(hi) - mid(lo)))
+    else if (loV != null) est = loV
+    else if (hiV != null) est = hiV
+    return { t, avg: est != null ? Math.round(est * 10) / 10 : null, up: b.up, total: b.total, est: est != null }
+  })
+  const valued = points.filter((p): p is { t: number; avg: number; up: number; total: number; est: boolean } => p.avg != null)
   const lats = valued.map((p) => p.avg)
 
   if (!lats.length) {
@@ -199,7 +218,9 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
                     <span className="font-semibold" style={{ color: sc }}>{status}</span>
                   </div>
                   {nearest.avg != null ? (
-                    <div className="mt-0.5 font-mono text-foreground">{nearest.avg} ms latency</div>
+                    <div className="mt-0.5 font-mono text-foreground">
+                      {nearest.est ? `~${nearest.avg} ms (estimated)` : `${nearest.avg} ms latency`}
+                    </div>
                   ) : nearest.up === 0 && nearest.total ? (
                     <div className="mt-0.5 font-mono text-foreground">No response</div>
                   ) : null}

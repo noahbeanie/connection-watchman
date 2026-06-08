@@ -1,5 +1,5 @@
-import { fmtStreak, pctText, rangeWord } from "@/lib/format"
-import type { Live } from "@/lib/types"
+import { useState } from "react"
+import { pctText, rangeWord } from "@/lib/format"
 
 // Continuous green -> yellow -> red by availability. Tunable thresholds.
 // Pure green only when essentially perfect; below that the hue shifts visibly so
@@ -26,14 +26,19 @@ function arcColor(pct: number | null) {
 const R = 40
 const C = 2 * Math.PI * R
 
-export function AvailabilityGauge({ pct, presetId, live }: { pct: number | null; presetId: string; live: Live | null }) {
+export function AvailabilityGauge({ pct, presetId }: { pct: number | null; presetId: string }) {
   const color = arcColor(pct)
   const core = `color-mix(in oklab, ${color} 32%, white)` // hot, near-white filament
   const frac = Math.max(0, Math.min(1, (pct ?? 0) / 100))
   const offset = C * (1 - frac)
+  const [hov, setHov] = useState(false)
 
   return (
-    <div className="relative mx-auto aspect-square w-full max-w-[230px]">
+    <div
+      className="relative mx-auto aspect-square w-full max-w-[230px]"
+      onMouseEnter={() => setHov(true)}
+      onMouseLeave={() => setHov(false)}
+    >
       {/* ambient light the lit tube spills onto the dark card, concentrated at the tube radius */}
       <div
         className="pointer-events-none absolute inset-0 rounded-full"
@@ -41,6 +46,14 @@ export function AvailabilityGauge({ pct, presetId, live }: { pct: number | null;
           background: `radial-gradient(circle at 50% 50%, transparent 58%, color-mix(in oklab, ${color} 32%, transparent) 74%, transparent 88%)`,
           filter: "blur(7px)",
           opacity: frac > 0 ? 1 : 0,
+        }}
+      />
+      {/* slow breathing glow while hovering the gauge */}
+      <div
+        className={`pointer-events-none absolute inset-0 rounded-full transition-opacity duration-700 ${hov ? "gauge-glow" : "opacity-0"}`}
+        style={{
+          background: `radial-gradient(circle at 50% 50%, color-mix(in oklab, ${color} 45%, transparent) 0%, color-mix(in oklab, ${color} 18%, transparent) 55%, transparent 75%)`,
+          filter: "blur(18px)",
         }}
       />
       {/* overflow visible so the glow blooms past the viewBox instead of clipping at the edge */}
@@ -85,11 +98,6 @@ export function AvailabilityGauge({ pct, presetId, live }: { pct: number | null;
             {pctText(pct)}
           </div>
           <div className="mt-1.5 text-xs font-medium text-foreground">Uptime · {rangeWord(presetId)}</div>
-          {live && live.status !== "nodata" && live.streak_seconds != null && (
-            <div className="mt-1.5 font-mono text-xl font-bold leading-none tabular-nums tracking-tight whitespace-nowrap text-foreground">
-              {fmtStreak(live.streak_seconds)}
-            </div>
-          )}
         </div>
       </div>
     </div>

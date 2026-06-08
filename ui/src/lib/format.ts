@@ -75,6 +75,22 @@ export function fmtDate(ts: number): string {
   return new Date(ts * 1000).toLocaleDateString([], { month: "short", day: "numeric" })
 }
 
+// Compact label for a custom date range, always including the year:
+// "Jun 1, 2026", "Jun 1-8, 2026", "Jun 1 - Jul 3, 2026", or "Dec 30, 2025 - Jan 2, 2026".
+export function fmtRangeShort(startSec: number, endSec: number): string {
+  const a = new Date(startSec * 1000)
+  const b = new Date(endSec * 1000)
+  const mo = (d: Date) => d.toLocaleDateString("en-US", { month: "short" })
+  if (a.getFullYear() === b.getFullYear()) {
+    if (a.getMonth() === b.getMonth()) {
+      const days = a.getDate() === b.getDate() ? `${a.getDate()}` : `${a.getDate()}-${b.getDate()}`
+      return `${mo(a)} ${days}, ${a.getFullYear()}`
+    }
+    return `${mo(a)} ${a.getDate()} - ${mo(b)} ${b.getDate()}, ${b.getFullYear()}`
+  }
+  return `${mo(a)} ${a.getDate()}, ${a.getFullYear()} - ${mo(b)} ${b.getDate()}, ${b.getFullYear()}`
+}
+
 // Long, human "since" stamp for the header, e.g. "June 8, 2026 @ 1PM" (or "1:47PM" off the
 // hour). Minutes are shown only when non-zero so an on-the-hour start reads cleanly.
 export function fmtSince(ts: number): string {
@@ -108,6 +124,7 @@ export function uptimeColor(p: number | null): string {
 }
 
 export function rangeWord(presetId: string): string {
+  if (presetId === "custom") return "custom range"
   return PRESETS.find((p) => p.id === presetId)?.word ?? ""
 }
 

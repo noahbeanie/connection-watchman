@@ -674,9 +674,12 @@ class Handler(BaseHTTPRequestHandler):
                         conn.execute("COMMIT")
                         self._send(400, json.dumps({"error": "can't delete an ongoing outage"}), "application/json")
                         return
-                    # The internet was actually fine (e.g. a modem reset): mark the down checks
-                    # in this window back to online, then drop the outage entirely.
-                    conn.execute("UPDATE checks SET up=1 WHERE ts>=? AND ts<=? AND up=0",
+                    # The internet was actually fine (e.g. a modem reset): mark the whole window
+                    # back online AND clear its latency samples. Clearing matters because a partial
+                    # outage's surviving connects sit near the timeout; left in place they'd linger
+                    # as a hidden-spike gap. With no samples, the latency chart fills the span with
+                    # an estimated line instead. Then drop the outage entirely.
+                    conn.execute("UPDATE checks SET up=1, latency_ms=NULL WHERE ts>=? AND ts<?",
                                  (row["start_ts"], row["end_ts"]))
                     conn.execute("DELETE FROM outages WHERE id=?", (oid,))
                     conn.execute("COMMIT")

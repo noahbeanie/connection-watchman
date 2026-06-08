@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
-import { CAUSE_EXPLAIN, fmtDate, fmtTime, pctText } from "@/lib/format"
+import { CAUSE_EXPLAIN, CAUSE_LABEL, fmtDate, fmtTime, pctText } from "@/lib/format"
 import type { RangeData } from "@/lib/types"
+
+const causeColor: Record<string, string> = {
+  isp: "var(--orange)", local: "var(--down)", dns: "var(--primary)", unknown: "var(--muted-foreground)",
+}
 
 interface Seg {
   t: number; end: number; up: number; total: number
@@ -154,6 +158,8 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
       status: noData ? "No data" : down ? (partial ? "Partial outage" : "Offline") : "Online",
       statusColor: noData ? "var(--muted-foreground)" : down ? (partial ? "var(--amber)" : "var(--down)") : "var(--up)",
       total: sg.total, avg: sg.avg,
+      cause: causes[0] ?? "unknown",
+      causeLabel: causes.length ? causes.map((c) => CAUSE_LABEL[c] ?? CAUSE_LABEL.unknown).join(", ") : CAUSE_LABEL.unknown,
       explain: causes.map((c) => CAUSE_EXPLAIN[c] ?? CAUSE_EXPLAIN.unknown).join(" "),
     }
   })() : null
@@ -197,6 +203,12 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
               <span className="font-mono font-semibold">{info.when}</span>
               <span className="font-semibold" style={{ color: info.statusColor }}>{info.status}</span>
             </div>
+            {info.down && (
+              <div className="mt-1 text-xs">
+                <span className="text-muted-foreground">Cause: </span>
+                <span className="font-medium" style={{ color: causeColor[info.cause] ?? causeColor.unknown }}>{info.causeLabel}</span>
+              </div>
+            )}
             {partial ? (
               <div className="mt-1.5">
                 {mini && mini.key === activeSeg.t ? (

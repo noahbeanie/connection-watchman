@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
-  Activity, Download, Pause, Play, Siren, Trash2, TrendingDown,
+  Activity, Download, Pause, Play, Siren, Trash2, TrendingDown, TrendingUp,
 } from "lucide-react"
 import { toast } from "sonner"
 import { Card } from "@/components/ui/card"
@@ -16,14 +16,14 @@ import { LatencyChart } from "@/components/LatencyChart"
 import { Tracker } from "@/components/Tracker"
 import { StatCard } from "@/components/StatCard"
 import { StatusBadge } from "@/components/StatusBadge"
-import { DnsTargets } from "@/components/DnsTargets"
 import { OutagesEmpty } from "@/components/OutagesEmpty"
 import { OutagesTimeline } from "@/components/OutagesTimeline"
 import { CauseLegend } from "@/components/CauseLegend"
+import { DateRangePicker } from "@/components/DateRangePicker"
 import { InfoTip } from "@/components/InfoTip"
 import type { Live, Meta, RangeData } from "@/lib/types"
 import {
-  PRESETS, defaultPreset, fmtDate, fmtDur, fmtSince, fmtTime, humanBytes, latencyFence, nowSec, pctText,
+  PRESETS, defaultPreset, fmtDate, fmtDur, fmtRangeShort, fmtSince, fmtStreak, fmtTime, humanBytes, latencyFence, nowSec, pctText, resolverName,
 } from "@/lib/format"
 
 const api = async (p: string) => (await fetch(p, { cache: "no-store" })).json()
@@ -75,6 +75,7 @@ const Skeleton = ({ h }: { h: number }) => (
 
 export default function App() {
   const [preset, setPreset] = useState("24h")
+  const [customRange, setCustomRange] = useState<{ start: number; end: number } | null>(null)
   const [data, setData] = useState<RangeData | null>(null)
   const [allOutages, setAllOutages] = useState<RangeData | null>(null)
   const [live, setLive] = useState<Live | null>(null)
@@ -86,9 +87,9 @@ export default function App() {
   const booted = useRef(false)
 
   const loadRange = useCallback(async () => {
-    const { start, end } = windowFor(preset)
+    const { start, end } = preset === "custom" && customRange ? customRange : windowFor(preset)
     try { setData(await api(`/api/range?start=${start}&end=${end}`)) } catch { /* keep last */ }
-  }, [preset])
+  }, [preset, customRange])
 
   useEffect(() => {
     loadRange()
@@ -181,8 +182,15 @@ export default function App() {
   const latMax = latAvgs.length ? Math.max(...latAvgs) : null
   const down = s?.down_seconds ?? 0
   const outs = s?.outage_count ?? 0
-  // Label suffix = the selected period (e.g. "1H", "1Y", "All").
-  const periodLabel = PRESETS.find((p) => p.id === preset)?.label ?? ""
+  // Label suffix = the selected period (e.g. "1H", "1Y", "All", or a compact custom range).
+  const periodLabel = preset === "custom" && customRange
+    ? fmtRangeShort(customRange.start, customRange.end)
+    : PRESETS.find((p) => p.id === preset)?.label ?? ""
+  // Current uptime = how long the connection has been continuously online right now (the live
+  // up-streak), independent of the selected range.
+  const upStreak = live?.status === "up" ? fmtStreak(live.streak_seconds ?? 0)
+    : live?.status === "down" ? "Offline" : meta?.paused ? "Paused" : "—"
+  const upStreakColor = live?.status === "up" ? "var(--up)" : live?.status === "down" ? "var(--down)" : "var(--muted-foreground)"
 
   // All-time stats (from the first-check fetch) + live, for the Data & tools panel
   const at = allOutages?.summary
@@ -191,7 +199,7 @@ export default function App() {
   const mtbf = at && at.outage_count > 0 ? at.monitored_seconds / at.outage_count : null
   const lastOut = allOutages?.outages.find((o) => o.kind !== "dns")
   const liveLat = live?.latency_ms != null ? `${live.latency_ms} ms` : live?.status === "down" ? "Offline" : "—"
-  const dataSections: { title: string; rows: { label: string; hint: string; value?: ReactNode; control?: ReactNode }[] }[] = meta
+  const dataSections: { title: string; rows: { label: string; hint: ReactNode; value?: ReactNode; control?: ReactNode }[] }[] = meta
     ? [
         {
           title: "Monitoring",
@@ -210,10 +218,40 @@ export default function App() {
             { label: "Check interval", control: <ConfigSelect value={meta.interval} options={INTERVAL_OPTS} onChange={(v) => updateConfig("interval", v)} />, hint: "How often a connectivity check runs. Takes effect within a cycle; the rest of the app follows the new cadence." },
             { label: "Gateway", value: meta.gateway ?? "Unknown", hint: "Your router's local IP. Used to tell a local problem apart from an ISP problem." },
             { label: "Retention", control: <ConfigSelect value={meta.retention_days} options={RETENTION_OPTS} onChange={(v) => updateConfig("retention_days", v)} />, hint: "How long raw per-check data is kept before it's trimmed." },
-            { label: "Database", value: humanBytes(meta.db_size_bytes), hint: "Size of the local database file on disk." },
+            {
+              label: "Database",
+              value: humanBytes(meta.db_size_bytes),
+              hint: (
+                <div>
+                  <p>Local database file size. The raw check log grows at roughly:</p>
+                  <ul className="mt-1.5 space-y-0.5">
+                    {[5, 10, 15, 30, 60].map((iv) => {
+                      const mb = (15 * 15) / iv // ~15 MB/month at the 15s default, scales with the check rate
+                      return (
+                        <li key={iv} className={`flex justify-between gap-3 ${iv === meta.interval ? "font-semibold text-foreground" : ""}`}>
+                          <span>Every {iv}s{iv === meta.interval ? " (current)" : ""}</span>
+                          <span>~{mb >= 10 ? Math.round(mb) : mb.toFixed(1)} MB/mo</span>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                  <p className="mt-1.5 text-muted-foreground">Older rows are trimmed at your retention setting, so the file plateaus.</p>
+                </div>
+              ),
+            },
             { label: "Outage history", control: <ConfigSelect value={meta.outage_retention_days} options={OUTAGE_OPTS} onChange={(v) => updateConfig("outage_retention_days", v)} />, hint: "How long resolved outages are kept. Independent of the raw-data retention above." },
           ],
         },
+        ...(meta.resolvers?.length
+          ? [{
+              title: "DNS resolvers",
+              rows: meta.resolvers.map((ip) => ({
+                label: resolverName(ip),
+                value: ip,
+                hint: "A public DNS resolver the monitor queries to confirm name resolution. DNS is tracked as its own signal and never counts as connectivity downtime.",
+              })),
+            }]
+          : []),
       ]
     : []
 
@@ -228,7 +266,7 @@ export default function App() {
             <Activity className="size-5" />
           </div>
           <div className="min-w-0">
-            <h1 className="text-3xl font-semibold leading-none tracking-tight sm:text-5xl">
+            <h1 className="text-3xl font-semibold leading-none tracking-tight text-muted-foreground sm:text-5xl">
               Connection Watchman
             </h1>
           </div>
@@ -257,15 +295,17 @@ export default function App() {
         {/* Left column: availability gauge, then the incident tiles */}
         <div className="order-2 flex flex-col gap-4 lg:order-1">
           <Card className="flex items-center justify-center p-4">
-            <AvailabilityGauge pct={s?.availability_pct ?? null} presetId={preset} live={live} />
+            <AvailabilityGauge pct={s?.availability_pct ?? null} presetId={preset} />
           </Card>
+          <StatCard className="grow" icon={TrendingUp} label="Current uptime" accent="var(--up)"
+            value={upStreak} valueColor={upStreakColor}
+            hint="How long the connection has been continuously online right now, with no outages. This is the live streak and ignores the selected time range." />
           <StatCard className="grow" icon={TrendingDown} label={`Downtime (${periodLabel})`} accent="var(--down)"
             value={fmtDur(down)} valueColor={down > 0 ? "var(--down)" : "var(--muted-foreground)"}
             hint="Total time your connection was down in the selected period, not counting paused or no-data periods." />
           <StatCard className="grow" icon={Siren} label={`Outages (${periodLabel})`} accent="var(--orange)"
             value={s ? outs : "—"} valueColor={outs > 0 ? "var(--orange)" : "var(--muted-foreground)"}
             hint="How many separate times your connection dropped in the selected period." />
-          <DnsTargets className="grow" resolvers={meta?.resolvers ?? []} />
         </div>
 
         {/* Right column: uptime + latency in one container, shared range tabs and linked hover */}
@@ -280,7 +320,7 @@ export default function App() {
                     <Button key={p.id} type="button" size="sm" disabled={tooBig}
                       variant={preset === p.id ? "default" : "ghost"}
                       className={`h-8 px-1.5 text-[11px] font-semibold sm:px-3 sm:text-xs ${tooBig ? "w-full sm:w-auto" : "flex-1 sm:flex-none"}`}
-                      onClick={() => setPreset(p.id)}>
+                      onClick={() => { setPreset(p.id); setCustomRange(null) }}>
                       {p.label}
                     </Button>
                   )
@@ -291,6 +331,13 @@ export default function App() {
                   ) : btn
                 })}
               </div>
+              <DateRangePicker
+                firstTs={meta?.first_ts ?? null}
+                now={nowSec()}
+                value={customRange}
+                active={preset === "custom"}
+                onApply={(start, end) => { setCustomRange({ start, end }); setPreset("custom") }}
+              />
               <span className="font-mono text-2xl font-bold leading-none tabular-nums text-foreground sm:ml-auto sm:text-4xl">
                 {nowTs.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true })}
               </span>

@@ -154,3 +154,10 @@
   --chart-4: var(--amber);
   --chart-5: var(--orange);
 }
+
+/* Slow breathing glow shown while hovering the availability gauge. */
+@keyframes gaugeGlow {
+  0%, 100% { opacity: 0.16; }
+  50%      { opacity: 0.7; }
+}
+.gauge-glow { animation: gaugeGlow 3.6s ease-in-out infinite; }
