@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Internet Uptime</title>
+<style>
+  :root {
+    --hue: 245;
+    --bg:        oklch(0.145 0.014 var(--hue));
+    --bg-2:      oklch(0.125 0.014 var(--hue));
+    --surface:   oklch(0.198 0.016 var(--hue));
+    --surface-2: oklch(0.245 0.018 var(--hue));
+    --line:      oklch(0.30 0.016 var(--hue));
+    --line-2:    oklch(0.38 0.018 var(--hue));
+    --ink:       oklch(0.97 0.006 var(--hue));
+    --dim:       oklch(0.76 0.018 var(--hue));
+    --faint:     oklch(0.63 0.016 var(--hue));
+    --accent:    oklch(0.72 0.15 264);
+    --accent-ink:oklch(0.99 0.01 264);
+    --up:        oklch(0.78 0.17 152);
+    --warn:      oklch(0.84 0.14 92);
+    --warn2:     oklch(0.77 0.16 58);
+    --down:      oklch(0.66 0.22 22);
+    --unknown:   oklch(0.70 0.02 var(--hue));
+    --up-band:   oklch(0.72 0.16 152 / 0.5);
+    --down-band: oklch(0.64 0.22 22 / 0.95);
+    --gap-band:  oklch(0.72 0.02 var(--hue) / 0.38);
+    --lat-line:  oklch(0.94 0.09 200);
+
+    --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:20px; --s6:28px; --s7:40px;
+    --r-sm:8px; --r-md:12px; --r-lg:16px; --r-xl:20px; --r-pill:999px;
+    --ease: cubic-bezier(0.22, 1, 0.36, 1);
+    --shadow: 0 1px 2px oklch(0 0 0 / 0.35), 0 10px 30px oklch(0 0 0 / 0.22);
+    --font: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing:border-box; }
+  html { font-size:16px; -webkit-text-size-adjust:100%; }
+  body { margin:0; color:var(--ink); font-family:var(--font); line-height:1.5; letter-spacing:0.005em;
+    -webkit-font-smoothing:antialiased;
+    background:
+      radial-gradient(1200px 600px at 80% -10%, color-mix(in oklab, var(--accent) 12%, transparent), transparent 60%),
+      radial-gradient(900px 500px at -10% 0%, color-mix(in oklab, var(--up) 7%, transparent), transparent 55%),
+      var(--bg-2);
+    min-height:100vh; }
+  .app { max-width:1180px; margin:0 auto; padding:clamp(18px,3.2vw,34px) clamp(16px,4vw,40px) 64px; }
+
+  /* top bar */
+  .topbar { display:flex; align-items:center; justify-content:space-between; gap:var(--s4); margin-bottom:var(--s6); }
+  .brand { display:flex; align-items:center; gap:var(--s3); min-width:0; }
+  .mark { width:34px; height:34px; border-radius:10px; flex:none;
+    background:linear-gradient(140deg, var(--accent), var(--up)); box-shadow:inset 0 0 0 1px oklch(1 0 0 / 0.12); }
+  .brand h1 { font-size:1.18rem; font-weight:660; margin:0; letter-spacing:-0.015em; }
+  #appsub { color:var(--faint); font-size:0.76rem; font-family:var(--mono); margin-top:2px; }
+  .pill { display:inline-flex; align-items:center; gap:var(--s2); flex:none;
+    font-size:0.8125rem; font-weight:600; padding:7px 13px 7px 11px; border-radius:var(--r-pill);
+    background:var(--surface); border:1px solid var(--line); color:var(--dim);
+    transition:background .25s var(--ease), border-color .25s var(--ease), color .25s var(--ease); }
+  .pill .dot { width:9px; height:9px; border-radius:50%; background:var(--unknown); }
+  .pill[data-state="up"]   { color:color-mix(in oklab,var(--up) 50%,var(--ink));
+    background:color-mix(in oklab,var(--up) 13%,var(--surface)); border-color:color-mix(in oklab,var(--up) 32%,var(--line)); }
+  .pill[data-state="down"] { color:color-mix(in oklab,var(--down) 60%,var(--ink));
+    background:color-mix(in oklab,var(--down) 15%,var(--surface)); border-color:color-mix(in oklab,var(--down) 38%,var(--line)); }
+  .pill[data-state="unknown"],.pill[data-state="nodata"],.pill[data-state="paused"]{ color:color-mix(in oklab,var(--warn) 55%,var(--ink));
+    background:color-mix(in oklab,var(--warn) 12%,var(--surface)); border-color:color-mix(in oklab,var(--warn) 28%,var(--line)); }
+  .pill[data-state="up"] .dot{ background:var(--up); animation:pulse 2.4s var(--ease) infinite; color:var(--up); }
+  .pill[data-state="down"] .dot{ background:var(--down); }
+  .pill[data-state="unknown"] .dot,.pill[data-state="nodata"] .dot,.pill[data-state="paused"] .dot{ background:var(--warn); }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 color-mix(in oklab,currentColor 55%,transparent);}
+    70%{box-shadow:0 0 0 7px color-mix(in oklab,currentColor 0%,transparent);}
+    100%{box-shadow:0 0 0 0 color-mix(in oklab,currentColor 0%,transparent);} }
+
+  /* KPI row — uniform sizing, aligned */
+  .kpis { display:grid; grid-template-columns:repeat(2,1fr); gap:clamp(10px,1.3vw,14px); margin-bottom:clamp(14px,1.6vw,18px); }
+  .kpi { display:flex; flex-direction:column; background:var(--surface); border:1px solid var(--line);
+    border-radius:var(--r-lg); padding:clamp(15px,1.6vw,19px); box-shadow:var(--shadow); min-height:92px; }
+  .kpi .v { font-family:var(--mono); font-variant-numeric:tabular-nums; font-weight:680; letter-spacing:-0.015em;
+    line-height:1.05; font-size:clamp(1.5rem,2.1vw,1.85rem); color:var(--ink); white-space:nowrap; }
+  .kpi .v .unit { font-size:0.56em; color:var(--dim); font-weight:500; margin-left:1px; }
+  .kpi .label { color:var(--dim); font-size:0.78rem; margin-top:auto; padding-top:10px; }
+  .kpi .label b { color:var(--ink); font-weight:600; }
+  .kpi.primary { background:linear-gradient(180deg, color-mix(in oklab,var(--accent) 10%,var(--surface)), var(--surface));
+    border-color:color-mix(in oklab,var(--accent) 22%,var(--line)); grid-column:1/-1; }
+
+  /* panels */
+  .panel { background:var(--surface); border:1px solid var(--line); border-radius:var(--r-xl);
+    padding:clamp(16px,1.9vw,24px); box-shadow:var(--shadow); }
+  .chart-panel { margin-bottom:clamp(14px,1.6vw,18px); }
+  .chart-head { display:flex; align-items:center; justify-content:space-between; gap:var(--s3);
+    flex-wrap:wrap; margin-bottom:var(--s5); }
+  .chart-head-right { display:flex; align-items:center; gap:var(--s4); }
+
+  .frames { display:inline-flex; gap:2px; padding:3px; background:var(--bg); border:1px solid var(--line);
+    border-radius:11px; overflow-x:auto; scrollbar-width:none; max-width:100%; }
+  .frames::-webkit-scrollbar { display:none; }
+  .frame { flex:0 0 auto; font:inherit; font-size:0.8rem; font-weight:600; color:var(--dim);
+    background:transparent; border:none; border-radius:8px; padding:8px 13px; min-height:34px; cursor:pointer;
+    transition:background .15s var(--ease), color .15s var(--ease); }
+  .frame:hover { color:var(--ink); }
+  .frame.active { background:var(--accent); color:var(--accent-ink); box-shadow:0 1px 3px oklch(0 0 0/.3); }
+  .frame:disabled { opacity:0.3; cursor:not-allowed; }
+  .frame:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+
+  .lat-toggle { display:inline-flex; align-items:center; gap:7px; color:var(--dim); font-size:0.82rem; cursor:pointer; user-select:none; }
+  .lat-toggle input { accent-color:var(--accent); width:16px; height:16px; }
+  .legend { display:flex; gap:var(--s3); color:var(--faint); font-size:0.72rem; }
+  .legend i { display:inline-block; width:9px; height:9px; border-radius:3px; margin-right:5px; vertical-align:-1px; }
+
+  svg { width:100%; display:block; }
+  #mainChart svg { height:clamp(210px, 25vw, 340px); border-radius:var(--r-md); }
+  .axis { fill:var(--faint); font-size:10px; font-family:var(--mono); }
+  .axis.lat { fill:var(--ink); paint-order:stroke; stroke:oklch(0.13 0.012 var(--hue) / 0.72); stroke-width:3px; stroke-linejoin:round; }
+  .cap { display:flex; justify-content:space-between; color:var(--faint); font-size:0.74rem; font-family:var(--mono); margin-top:10px; }
+
+  /* lower two-column area */
+  .lower { display:grid; gap:clamp(14px,1.6vw,18px); grid-template-columns:1fr; }
+  .sec-title { font-size:0.9rem; font-weight:640; color:var(--ink); margin:0 0 var(--s4); letter-spacing:-0.01em; }
+
+  .row { display:flex; flex-wrap:wrap; gap:var(--s2); align-items:center; margin:var(--s2) 0; }
+  input[type=text] { font:inherit; font-size:0.82rem; font-family:var(--mono); color:var(--ink);
+    background:var(--bg); border:1px solid var(--line); border-radius:var(--r-sm); padding:8px 10px; min-height:38px; color-scheme:dark; }
+  input:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  .tools { display:flex; flex-wrap:wrap; gap:var(--s2); }
+  .btn { font:inherit; font-size:0.82rem; font-weight:600; color:var(--ink); background:var(--surface-2);
+    border:1px solid var(--line); border-radius:var(--r-sm); padding:0 15px; min-height:38px; cursor:pointer;
+    transition:background .15s var(--ease), border-color .15s var(--ease); }
+  .btn:hover { background:color-mix(in oklab,var(--accent) 10%,var(--surface-2)); border-color:var(--line-2); }
+  .btn.danger { color:color-mix(in oklab,var(--down) 60%,var(--ink)); border-color:color-mix(in oklab,var(--down) 35%,var(--line)); }
+  .btn.danger:hover { background:color-mix(in oklab,var(--down) 16%,var(--surface-2)); }
+  .btn:disabled { opacity:.4; cursor:not-allowed; }
+  .meta-line { color:var(--faint); font-size:0.78rem; font-family:var(--mono); margin-bottom:var(--s4); line-height:1.7; }
+  .meta-line b { color:var(--dim); }
+
+  table { width:100%; border-collapse:collapse; font-size:0.84rem; }
+  th { text-align:left; color:var(--faint); font-weight:550; font-size:0.72rem; padding:var(--s2); border-bottom:1px solid var(--line); }
+  td { padding:10px var(--s2); border-bottom:1px solid color-mix(in oklab,var(--line) 50%,transparent);
+    font-variant-numeric:tabular-nums; font-family:var(--mono); }
+  td:last-child{ font-family:var(--font); }
+  tr:last-child td { border-bottom:none; }
+  .tag { display:inline-block; padding:2px 9px; border-radius:var(--r-pill); font-size:0.7rem; font-weight:600; }
+  .tag.isp   { background:color-mix(in oklab,var(--warn2) 20%,transparent); color:color-mix(in oklab,var(--warn2) 58%,var(--ink)); }
+  .tag.local { background:color-mix(in oklab,var(--down) 18%,transparent); color:color-mix(in oklab,var(--down) 58%,var(--ink)); }
+  .tag.dns   { background:color-mix(in oklab,var(--accent) 22%,transparent); color:color-mix(in oklab,var(--accent) 60%,var(--ink)); }
+  .tag.unknown { background:color-mix(in oklab,var(--unknown) 22%,transparent); color:var(--dim); }
+  .empty { color:var(--faint); font-size:0.85rem; padding:var(--s6) var(--s2); text-align:center; }
+  #foot { color:var(--faint); font-size:0.72rem; font-family:var(--mono); text-align:center; margin-top:var(--s7); }
+
+  @media (min-width:560px){ .kpis{ grid-template-columns:repeat(3,1fr); } .kpi.primary{ grid-column:1/-1; } }
+  @media (min-width:920px){
+    .kpis{ grid-template-columns:repeat(5,1fr); }
+    .kpi.primary{ grid-column:auto; }
+    .lower{ grid-template-columns:1.7fr 1fr; align-items:start; }
+  }
+  @media (prefers-reduced-motion: reduce){ *{ animation:none !important; transition-duration:1ms !important; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <div class="mark"></div>
+      <div>
+        <h1>Internet Uptime</h1>
+        <div id="appsub">Loading…</div>
+      </div>
+    </div>
+    <span class="pill" id="statusPill" data-state="nodata"><span class="dot"></span><span id="pillText">…</span></span>
+  </header>
+
+  <section class="kpis">
+    <div class="kpi primary"><div class="v" id="availVal">—</div><div class="label" id="availLabel">uptime</div></div>
+    <div class="kpi"><div class="v" id="streakVal">—</div><div class="label" id="streakLabel">current</div></div>
+    <div class="kpi"><div class="v" id="kDown">—</div><div class="label">downtime</div></div>
+    <div class="kpi"><div class="v" id="kOut">—</div><div class="label">outages</div></div>
+    <div class="kpi"><div class="v" id="kLat">—</div><div class="label">avg latency</div></div>
+  </section>
+
+  <section class="panel chart-panel">
+    <div class="chart-head">
+      <div class="frames" id="frames"></div>
+      <div class="chart-head-right">
+        <label class="lat-toggle"><input type="checkbox" id="latToggle"> Latency</label>
+        <span class="legend">
+          <span><i style="background:var(--up-band)"></i>up</span>
+          <span><i style="background:var(--down-band)"></i>down</span>
+          <span><i style="background:var(--gap-band)"></i>no data</span>
+        </span>
+      </div>
+    </div>
+    <div id="mainChart"></div>
+    <div class="cap"><span id="capStart"></span><span id="capEnd">now</span></div>
+  </section>
+
+  <div class="lower">
+    <section class="panel">
+      <h2 class="sec-title">Recent outages</h2>
+      <div id="outages"></div>
+    </section>
+    <section class="panel">
+      <h2 class="sec-title">Data &amp; tools</h2>
+      <div class="meta-line" id="metaLine"></div>
+      <div class="tools">
+        <button class="btn" id="exportChecks">Export checks (CSV)</button>
+        <button class="btn" id="exportOutages">Export outages (CSV)</button>
+        <button class="btn" id="pauseBtn">Pause monitoring</button>
+        <button class="btn danger" id="resetBtn">Reset all data…</button>
+      </div>
+      <div class="row" style="margin-top:var(--s2)">
+        <span id="resetConfirm" style="display:none">
+          <input type="text" id="resetToken" placeholder="type RESET" autocomplete="off" style="width:130px">
+          <button class="btn danger" id="resetGo" disabled>Confirm wipe</button>
+        </span>
+      </div>
+    </section>
+  </div>
+
+  <div id="foot">Times shown in your local timezone.</div>
+</div>
+
+<script>
+const $ = (s, el=document) => el.querySelector(s);
+const PRESETS = [
+  {id:"1h",  label:"1H",  span:3600,     word:"last hour"},
+  {id:"6h",  label:"6H",  span:21600,    word:"last 6 hours"},
+  {id:"24h", label:"24H", span:86400,    word:"last 24 hours"},
+  {id:"7d",  label:"7D",  span:604800,   word:"last 7 days"},
+  {id:"30d", label:"30D", span:2592000,  word:"last 30 days"},
+  {id:"6mo", label:"6M",  span:15552000, word:"last 6 months"},
+  {id:"1y",  label:"1Y",  span:31536000, word:"last year"},
+  {id:"all", label:"All", span:null,     word:"all time"},
+];
+let state = { presetId:"24h", live:true, data:null, meta:null,
+              showLat: localStorage.getItem("showLat")==="1", booted:false };
+let rangeTimer=null;
+
+const nowSec=()=>Math.floor(Date.now()/1000);
+function fmtTime(ts,wd){ const d=new Date(ts*1000); const t=d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+  return wd? d.toLocaleDateString([],{month:"short",day:"numeric"})+" "+t : t; }
+function fmtDate(ts){ return new Date(ts*1000).toLocaleDateString([],{month:"short",day:"numeric"}); }
+function fmtDur(sec){ sec=Math.round(sec||0);
+  if(sec<60) return sec+"s";
+  if(sec<3600) return Math.floor(sec/60)+"m "+(sec%60)+"s";
+  if(sec<86400) return Math.floor(sec/3600)+"h "+Math.floor((sec%3600)/60)+"m";
+  return Math.floor(sec/86400)+"d "+Math.floor((sec%86400)/3600)+"h"; }
+function pctText(p){ return p==null?"—":(p>=99.995?"100":p.toFixed(p>=99.9?3:2))+"%"; }
+function colorFor(p){ if(p==null) return "var(--unknown)";
+  if(p>=99.9) return "var(--up)"; if(p>=95) return "var(--warn)"; if(p>0) return "var(--warn2)"; return "var(--down)"; }
+function rangeWord(){ const p=PRESETS.find(x=>x.id===state.presetId); return p?p.word:""; }
+function humanBytes(n){ if(!n) return "0 B"; const u=["B","KB","MB","GB"]; let i=0; while(n>=1024&&i<u.length-1){n/=1024;i++;} return n.toFixed(i?1:0)+" "+u[i]; }
+const CAUSE_LABEL={isp:"ISP / internet", local:"your network", dns:"DNS", unknown:"unknown"};
+
+/* ---- range selection ---- */
+function buildFrames(){ const c=$("#frames"); c.innerHTML="";
+  PRESETS.forEach(p=>{ const b=document.createElement("button"); b.className="frame"; b.textContent=p.label;
+    b.dataset.id=p.id; b.onclick=()=>{ if(!b.disabled) selectPreset(p.id); }; c.appendChild(b); }); }
+function highlightFrames(){ document.querySelectorAll("#frames .frame").forEach(b=>
+  b.classList.toggle("active", b.dataset.id===state.presetId)); }
+function updateFrames(firstTs){ if(!firstTs) return; const avail=nowSec()-firstTs;
+  document.querySelectorAll("#frames .frame").forEach(b=>{ const p=PRESETS.find(x=>x.id===b.dataset.id);
+    b.disabled = !!(p.span && p.span>avail); }); }
+function selectLongestAvailable(firstTs){
+  const avail = firstTs ? nowSec()-firstTs : 0;
+  const fits = PRESETS.filter(p=>p.span && p.span<=avail);
+  selectPreset(fits.length ? fits[fits.length-1].id : (firstTs ? "all" : "24h"));
+}
+function selectPreset(id){ state.presetId=id; highlightFrames(); fetchRange(); scheduleRange(); }
+function scheduleRange(){ if(rangeTimer){clearInterval(rangeTimer);rangeTimer=null;}
+  const p=PRESETS.find(x=>x.id===state.presetId); const span=(p&&p.span)?p.span:Infinity;
+  rangeTimer=setInterval(fetchRange, span<=86400?10000:span<=2592000?30000:60000); }
+function currentWindow(){ const end=nowSec(); const p=PRESETS.find(x=>x.id===state.presetId);
+  return {start:(p&&p.span)?end-p.span:0, end}; }
+
+/* ---- fetch ---- */
+async function fetchRange(){ const {start,end}=currentWindow();
+  try{ const d=await (await fetch(`/api/range?start=${start}&end=${end}`,{cache:"no-store"})).json();
+    state.data=d; renderHero(d); renderChart(d); renderOutages(d); updateFrames(d.first_ts);
+  }catch(e){ console.error("range load failed", e); } }
+async function fetchLive(){ try{ const s=await (await fetch("/api/live",{cache:"no-store"})).json();
+  renderPill(s); renderStreak(s); }catch(e){} }
+async function fetchMeta(){ try{ const m=await (await fetch("/api/meta",{cache:"no-store"})).json();
+  state.meta=m; renderMeta(m); return m; }catch(e){ return null; } }
+
+/* ---- renderers ---- */
+function renderPill(s){ const pill=$("#statusPill");
+  if(state.meta&&state.meta.paused){ pill.setAttribute("data-state","paused"); $("#pillText").textContent="Paused"; $("#appsub").textContent="Monitoring paused"; return; }
+  pill.setAttribute("data-state", s.status||"nodata");
+  const labels={up:"Online",down:"Offline",unknown:"No signal",nodata:"No data"};
+  let txt=labels[s.status]||"…"; if(s.status==="up"&&s.latency_ms!=null) txt+=" · "+s.latency_ms+"ms";
+  $("#pillText").textContent=txt;
+  if(s.status==="nodata"){ $("#appsub").textContent="Waiting for the monitor's first check…"; return; }
+  const live=s.status==="up"?`up ${s.streak_h}`:s.status==="down"?`down ${s.streak_h}`:"monitor not reporting";
+  $("#appsub").textContent=`${live} · every ${s.interval}s · updated ${new Date().toLocaleTimeString()}`; }
+function renderStreak(s){ const v=$("#streakVal"), l=$("#streakLabel");
+  if(!s||s.status==="nodata"){ v.textContent="—"; l.textContent="current"; v.style.color="var(--ink)"; return; }
+  if(s.status==="unknown"){ v.textContent="—"; l.textContent="not reporting"; v.style.color="var(--unknown)"; return; }
+  v.textContent=s.streak_h; v.style.color = s.status==="up"?"var(--up)":"var(--down)";
+  l.innerHTML = s.status==="up"?"currently <b>up</b>":"currently <b>down</b>"; }
+function renderHero(d){ const s=d.summary; const v=$("#availVal");
+  const p=s.availability_pct; v.textContent=pctText(p); v.style.color = p==null?"var(--ink)":colorFor(p);
+  $("#availLabel").innerHTML = p==null?`no data · <b>${rangeWord()}</b>`:`uptime · <b>${rangeWord()}</b>`;
+  $("#kDown").textContent=fmtDur(s.down_seconds); $("#kOut").textContent=s.outage_count;
+  $("#kLat").innerHTML = s.avg_lat==null?"—":`${s.avg_lat}<span class="unit">ms</span>`; }
+function renderMeta(m){ $("#metaLine").innerHTML =
+  `database <b>${humanBytes(m.db_size_bytes)}</b> · raw checks kept <b>${m.retention_days}d</b> · outage history kept forever`+
+  (m.gateway?` · gateway <b>${m.gateway}</b>`:"");
+  const pb=$("#pauseBtn"); if(pb) pb.textContent = m.paused?"Resume monitoring":"Pause monitoring"; }
+
+function renderChart(d){
+  const cont=$("#mainChart");
+  const hasAny = d.summary.availability_pct!=null || d.outages.length || d.gaps.length || d.buckets.length;
+  if(!hasAny){ cont.innerHTML='<div class="empty">No data in this range yet.</div>';
+    $("#capStart").textContent=""; $("#capEnd").textContent=""; return; }
+  // full-width plot always (no geometry change when latency toggles -> no shift)
+  const W=1000, H=200, padT=10, padB=4, plotH=H-padT-padB, win=d.end-d.start;
+  const X=t=>(t-d.start)/win*W;
+
+  const clip=(s,e)=>[Math.max(s,d.start),Math.min(e,d.end)];
+  const blocks=[];
+  for(const o of d.outages){ const e=o.ongoing?d.now:o.end; const [s2,e2]=clip(o.start,e); if(e2>s2) blocks.push({s:s2,e:e2,type:"outage"}); }
+  for(const g of d.gaps){ const [s2,e2]=clip(g.start,g.end); if(e2>s2) blocks.push({s:s2,e:e2,type:g.kind}); }
+
+  let rects=`<rect x="0" y="${padT}" width="${W}" height="${plotH}" fill="var(--up-band)"/>`;
+  for(const b of blocks){ const x=X(b.s), w=Math.max(1.2, X(b.e)-x);
+    rects+=`<rect x="${x.toFixed(2)}" y="${padT}" width="${w.toFixed(2)}" height="${plotH}" fill="${b.type==="outage"?"var(--down-band)":"var(--gap-band)"}"/>`; }
+
+  let overlay="", axis="";
+  if(state.showLat){
+    const av=d.buckets.filter(p=>p.avg!=null).map(p=>p.avg);
+    const maxL=Math.max(20, Math.ceil((av.length?Math.max(...av):20)/10)*10);
+    const Y=v=>padT+(1-v/maxL)*plotH;
+    let path="",started=false;
+    for(const p of d.buckets){ if(p.avg!=null){ path+=(started?"L":"M")+X(p.t+d.bucket/2).toFixed(1)+","+Y(p.avg).toFixed(1); started=true; } else started=false; }
+    overlay=`<path d="${path}" fill="none" stroke="var(--lat-line)" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>`;
+    for(let g=0; g<=2; g++){ const val=maxL*g/2, y=Y(val);
+      axis+=`<line x1="0" y1="${y.toFixed(1)}" x2="${W}" y2="${y.toFixed(1)}" stroke="var(--ink)" stroke-width="1" opacity="0.15"/>`;
+      axis+=`<text class="axis lat" x="7" y="${(y+ (g===2?9:3)).toFixed(1)}" text-anchor="start">${Math.round(val)}${g===2?" ms":""}</text>`; }
+  }
+  cont.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${rects}${axis}${overlay}</svg>`;
+  const wd=win>86400;
+  $("#capStart").textContent=(wd?fmtDate(d.start):fmtTime(d.start));
+  $("#capEnd").textContent=state.live?"now":(wd?fmtDate(d.end):fmtTime(d.end));
+}
+
+function renderOutages(d){ const outs=d.outages;
+  if(!outs.length){ $("#outages").innerHTML='<div class="empty">No outages in this range.</div>'; return; }
+  const rows=outs.slice(0,60).map(o=>{ const c=o.cause||"unknown";
+    return `<tr><td>${fmtTime(o.start,true)}</td><td>${o.ongoing?"—":fmtTime(o.end,true)}</td>
+      <td>${o.duration_h}</td><td><span class="tag ${c}">${CAUSE_LABEL[c]||c}</span></td></tr>`; }).join("");
+  $("#outages").innerHTML=`<table><thead><tr><th>Started</th><th>Ended</th><th>Duration</th><th>Cause</th></tr></thead><tbody>${rows}</tbody></table>`; }
+
+/* ---- data tools ---- */
+function download(url){ const a=document.createElement("a"); a.href=url; a.download=""; document.body.appendChild(a); a.click(); a.remove(); }
+async function togglePause(){ const want=!(state.meta&&state.meta.paused);
+  await fetch("/api/pause",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({paused:want})});
+  await fetchMeta(); fetchLive(); }
+async function doReset(){
+  const res=await fetch("/api/reset",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirm:"RESET"})});
+  if(res.ok){ $("#resetConfirm").style.display="none"; $("#resetToken").value=""; await fetchMeta(); fetchRange(); }
+  else { alert("Reset failed: "+(await res.text())); } }
+
+/* ---- boot ---- */
+buildFrames();
+$("#latToggle").checked=state.showLat;
+$("#latToggle").onchange=e=>{ state.showLat=e.target.checked; localStorage.setItem("showLat", state.showLat?"1":"0"); if(state.data) renderChart(state.data); };
+$("#exportChecks").onclick=()=>{ const w=currentWindow(); download(`/api/export/checks.csv?start=${w.start}&end=${w.end}`); };
+$("#exportOutages").onclick=()=>{ const w=currentWindow(); download(`/api/export/outages.csv?start=${w.start}&end=${w.end}`); };
+$("#pauseBtn").onclick=togglePause;
+$("#resetBtn").onclick=()=>{ $("#resetConfirm").style.display="inline"; $("#resetToken").focus(); };
+$("#resetToken").oninput=e=>{ $("#resetGo").disabled = e.target.value!=="RESET"; };
+$("#resetGo").onclick=doReset;
+
+fetchMeta().then(m=>{ selectLongestAvailable(m && m.first_ts); state.booted=true; });
+fetchLive(); setInterval(fetchLive, 5000); setInterval(fetchMeta, 30000);
+</script>
+</body>
+</html>

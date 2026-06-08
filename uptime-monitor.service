@@ -1,0 +1,18 @@
+[Unit]
+Description=Internet uptime monitor (logging daemon)
+After=network.target
+
+[Service]
+Type=simple
+# Edit User and paths if you didn't use the default pi user / location.
+User=pi
+WorkingDirectory=/home/pi/pi-uptime-monitor
+ExecStart=/usr/bin/python3 /home/pi/pi-uptime-monitor/monitor.py
+Restart=always
+RestartSec=5
+# Optional overrides:
+# Environment=UPTIME_INTERVAL=5
+# Environment=UPTIME_DB=/home/pi/pi-uptime-monitor/uptime.db
+
+[Install]
+WantedBy=multi-user.target

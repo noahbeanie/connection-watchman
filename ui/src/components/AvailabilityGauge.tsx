@@ -1,0 +1,97 @@
+import { fmtStreak, pctText, rangeWord } from "@/lib/format"
+import type { Live } from "@/lib/types"
+
+// Continuous green -> yellow -> red by availability. Tunable thresholds.
+// Pure green only when essentially perfect; below that the hue shifts visibly so
+// any time under 100% reads differently (e.g. 99.36% lands ~60% green / yellow-green).
+const GREEN_AT = 99.9 // at or above this: solid green
+const YELLOW_AT = 98.5 // pure yellow
+const RED_AT = 95 // at or below this: solid red
+function arcColor(pct: number | null) {
+  if (pct == null) return "var(--muted-foreground)"
+  if (pct >= GREEN_AT) return "var(--up)"
+  if (pct >= YELLOW_AT) {
+    const g = ((pct - YELLOW_AT) / (GREEN_AT - YELLOW_AT)) * 100
+    return `color-mix(in oklab, var(--up) ${g.toFixed(1)}%, var(--amber))`
+  }
+  if (pct >= RED_AT) {
+    const y = ((pct - RED_AT) / (YELLOW_AT - RED_AT)) * 100
+    return `color-mix(in oklab, var(--amber) ${y.toFixed(1)}%, var(--down))`
+  }
+  return "var(--down)"
+}
+
+// Geometry of the ring, in the 0..100 viewBox. The arc starts at 12 o'clock
+// (svg rotated -90) and the lit fraction is revealed via stroke-dashoffset.
+const R = 40
+const C = 2 * Math.PI * R
+
+export function AvailabilityGauge({ pct, presetId, live }: { pct: number | null; presetId: string; live: Live | null }) {
+  const color = arcColor(pct)
+  const core = `color-mix(in oklab, ${color} 32%, white)` // hot, near-white filament
+  const frac = Math.max(0, Math.min(1, (pct ?? 0) / 100))
+  const offset = C * (1 - frac)
+
+  return (
+    <div className="relative mx-auto aspect-square w-full max-w-[230px]">
+      {/* ambient light the lit tube spills onto the dark card, concentrated at the tube radius */}
+      <div
+        className="pointer-events-none absolute inset-0 rounded-full"
+        style={{
+          background: `radial-gradient(circle at 50% 50%, transparent 58%, color-mix(in oklab, ${color} 32%, transparent) 74%, transparent 88%)`,
+          filter: "blur(7px)",
+          opacity: frac > 0 ? 1 : 0,
+        }}
+      />
+      {/* overflow visible so the glow blooms past the viewBox instead of clipping at the edge */}
+      <svg viewBox="0 0 100 100" className="absolute inset-0 size-full -rotate-90" style={{ overflow: "visible" }}>
+        <defs>
+          <filter id="neonBloom" x="-60%" y="-60%" width="220%" height="220%">
+            <feGaussianBlur stdDeviation="3" />
+          </filter>
+          <filter id="neonGlow" x="-40%" y="-40%" width="180%" height="180%">
+            <feGaussianBlur stdDeviation="1.1" />
+          </filter>
+          <filter id="neonCore" x="-30%" y="-30%" width="160%" height="160%">
+            <feGaussianBlur stdDeviation="0.45" />
+          </filter>
+        </defs>
+        {/* unlit glass tube (the remainder of the ring) */}
+        <circle cx="50" cy="50" r={R} fill="none" strokeWidth="7" strokeLinecap="round"
+          style={{ stroke: `color-mix(in oklab, ${color} 12%, transparent)` }} />
+        {/* wide soft bloom around the lit tube */}
+        <circle cx="50" cy="50" r={R} fill="none" strokeWidth="8" strokeLinecap="round"
+          strokeDasharray={C} strokeDashoffset={offset} filter="url(#neonBloom)"
+          style={{ stroke: color, opacity: 0.55 }} />
+        {/* tight inner glow */}
+        <circle cx="50" cy="50" r={R} fill="none" strokeWidth="7" strokeLinecap="round"
+          strokeDasharray={C} strokeDashoffset={offset} filter="url(#neonGlow)"
+          style={{ stroke: color, opacity: 0.95 }} />
+        {/* crisp lit tube */}
+        <circle cx="50" cy="50" r={R} fill="none" strokeWidth="7" strokeLinecap="round"
+          strokeDasharray={C} strokeDashoffset={offset} style={{ stroke: color }} />
+        {/* hot near-white filament down the centre of the tube */}
+        <circle cx="50" cy="50" r={R} fill="none" strokeWidth="2.2" strokeLinecap="round"
+          strokeDasharray={C} strokeDashoffset={offset} filter="url(#neonCore)"
+          style={{ stroke: core }} />
+      </svg>
+      {/* center readout */}
+      <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center">
+        <div className="flex w-[62%] flex-col items-center">
+          <div
+            className="font-mono text-4xl font-bold leading-none tabular-nums tracking-tight"
+            style={{ color, textShadow: `0 0 16px color-mix(in oklab, ${color} 55%, transparent)` }}
+          >
+            {pctText(pct)}
+          </div>
+          <div className="mt-1.5 text-xs font-medium text-foreground">Uptime · {rangeWord(presetId)}</div>
+          {live && live.status !== "nodata" && live.streak_seconds != null && (
+            <div className="mt-1.5 font-mono text-xl font-bold leading-none tabular-nums tracking-tight whitespace-nowrap text-foreground">
+              {fmtStreak(live.streak_seconds)}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}

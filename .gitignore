@@ -1,0 +1,25 @@
+# Live data — never commit (the Pi's real database / state)
+uptime.db
+uptime.db-wal
+uptime.db-shm
+PAUSED
+
+# Dev-only synthetic test database
+uptime_test.db
+uptime_test.db-wal
+uptime_test.db-shm
+
+# Python
+__pycache__/
+*.pyc
+
+# Node / frontend build tooling (web/ IS committed — the Pi serves it and has no Node)
+ui/node_modules/
+ui/dist/
+ui/.vite/
+
+# Scratch / editor / OS
+_t_*.py
+.DS_Store
+Thumbs.db
+*.log
