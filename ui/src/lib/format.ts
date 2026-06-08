@@ -75,6 +75,16 @@ export function fmtDate(ts: number): string {
   return new Date(ts * 1000).toLocaleDateString([], { month: "short", day: "numeric" })
 }
 
+// Long, human "since" stamp for the header, e.g. "June 8, 2026 @ 1PM" (or "1:47PM" off the
+// hour). Minutes are shown only when non-zero so an on-the-hour start reads cleanly.
+export function fmtSince(ts: number): string {
+  const d = new Date(ts * 1000)
+  const date = d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })
+  const h = d.getHours()
+  const min = d.getMinutes()
+  return `${date} @ ${h % 12 || 12}${min ? ":" + String(min).padStart(2, "0") : ""}${h < 12 ? "AM" : "PM"}`
+}
+
 export function pctText(p: number | null): string {
   if (p == null) return "—"
   return (p >= 99.995 ? "100" : p.toFixed(p >= 99.9 ? 3 : 2)) + "%"
@@ -111,4 +121,22 @@ export function defaultPreset(firstTs: number | null): string {
     if (span && span <= avail) return id
   }
   return "all"
+}
+
+// Robust upper bound for "normal" latency, used to hide spikes that would blow out the
+// latency chart's Y axis. Some buckets stay fully "up" yet average near the connect timeout
+// (a degraded-but-connected stretch); those are dropped past this fence so the line gaps and
+// the axis scales to typical latency. Tukey's upper fence (Q3 + 1.5*IQR), floored at 2x the
+// median so mild jitter is never hidden. Returns Infinity when there are too few samples to
+// judge, leaving short / sparse ranges untouched.
+export function latencyFence(values: number[]): number {
+  if (values.length < 12) return Infinity
+  const s = [...values].sort((a, b) => a - b)
+  const q = (p: number) => {
+    const idx = (s.length - 1) * p
+    const lo = Math.floor(idx), hi = Math.ceil(idx)
+    return s[lo] + (s[hi] - s[lo]) * (idx - lo)
+  }
+  const med = q(0.5), q1 = q(0.25), q3 = q(0.75)
+  return Math.max(q3 + 1.5 * (q3 - q1), med * 2)
 }

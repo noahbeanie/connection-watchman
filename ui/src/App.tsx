@@ -23,7 +23,7 @@ import { CauseLegend } from "@/components/CauseLegend"
 import { InfoTip } from "@/components/InfoTip"
 import type { Live, Meta, RangeData } from "@/lib/types"
 import {
-  PRESETS, defaultPreset, fmtDate, fmtDur, fmtTime, humanBytes, nowSec, pctText,
+  PRESETS, defaultPreset, fmtDate, fmtDur, fmtSince, fmtTime, humanBytes, latencyFence, nowSec, pctText,
 } from "@/lib/format"
 
 const api = async (p: string) => (await fetch(p, { cache: "no-store" })).json()
@@ -144,31 +144,45 @@ export default function App() {
     if (res.ok) { await Promise.allSettled([refetchMeta(), loadRange(), loadOutages()]); toast.success("Setting updated") }
     else toast.error("Update failed: " + (await res.text()))
   }
+  const saveOutageNote = async (id: number, note: string) => {
+    const res = await post("/api/outage/note", { id, note })
+    if (res.ok) { await loadOutages(); toast.success(note ? "Note saved" : "Note cleared") }
+    else toast.error("Could not save note: " + (await res.text()))
+  }
+  const deleteOutage = async (id: number) => {
+    const res = await post("/api/outage/delete", { id })
+    if (res.ok) { await Promise.allSettled([refetchMeta(), loadRange(), loadOutages()]); toast.success("Outage removed; that time is now marked online") }
+    else toast.error("Could not delete outage: " + (await res.text()))
+  }
   const exportUrl = (kind: string) => { const { start, end } = windowFor(preset); return `/api/export/${kind}.csv?start=${start}&end=${end}` }
   const exportData = () => { download(exportUrl("checks")); setTimeout(() => download(exportUrl("outages")), 400) }
 
   const availSecs = meta?.first_ts ? nowSec() - meta.first_ts : 0
   const histMsg = availSecs > 0 ? `Only ${fmtDur(availSecs)} of history so far` : "No history recorded yet"
   const s = data?.summary
-  const netOutages = allOutages ? allOutages.outages.filter((o) => o.kind !== "dns") : []
+  // Recent outages list is scoped to the last 24h, independent of the selected range: show
+  // anything still ongoing or that ended within the past day. (allOutages stays all-time so
+  // the Data & tools stats below remain lifetime figures.)
+  const dayCutoff = allOutages ? allOutages.now - 86400 : 0
+  const netOutages = allOutages
+    ? allOutages.outages.filter((o) => o.kind !== "dns" && (o.ongoing || (o.end != null && o.end >= dayCutoff)))
+    : []
   const wd = data ? data.end - data.start > 86400 : false
-  // Latency headline from healthy (fully-up) buckets only, so an outage's near-timeout
-  // survivors don't inflate Avg/Max (keeps this in step with the de-spiked latency chart).
-  const upB = data ? data.buckets.filter((b) => b.total > 0 && b.up === b.total) : []
-  const latW = upB.reduce((a, b) => a + (b.avg != null ? b.up : 0), 0)
-  const latAvg = latW ? Math.round((upB.reduce((a, b) => a + (b.avg != null ? b.avg * b.up : 0), 0) / latW) * 10) / 10 : null
-  const latMins = upB.map((b) => b.min).filter((x): x is number => x != null)
-  const latMaxs = upB.map((b) => b.max).filter((x): x is number => x != null)
-  const latMin = latMins.length ? Math.min(...latMins) : null
-  const latMax = latMaxs.length ? Math.max(...latMaxs) : null
+  // Latency headline from healthy (fully-up) buckets, with the same robust outlier fence the
+  // chart uses, so degraded-but-connected spikes near the timeout don't inflate Avg/Max. Min/Max
+  // describe the plotted (bucket-average) line, not single-check extremes.
+  const upB = data ? data.buckets.filter((b) => b.total > 0 && b.up === b.total && b.avg != null) : []
+  const latFence = latencyFence(upB.map((b) => b.avg as number))
+  const latKept = upB.filter((b) => (b.avg as number) <= latFence)
+  const latW = latKept.reduce((a, b) => a + b.up, 0)
+  const latAvg = latW ? Math.round((latKept.reduce((a, b) => a + (b.avg as number) * b.up, 0) / latW) * 10) / 10 : null
+  const latAvgs = latKept.map((b) => b.avg as number)
+  const latMin = latAvgs.length ? Math.min(...latAvgs) : null
+  const latMax = latAvgs.length ? Math.max(...latAvgs) : null
   const down = s?.down_seconds ?? 0
   const outs = s?.outage_count ?? 0
   // Label suffix = the selected period (e.g. "1H", "1Y", "All").
   const periodLabel = PRESETS.find((p) => p.id === preset)?.label ?? ""
-
-  const clockDot = meta?.paused
-    ? "var(--amber)"
-    : live?.status === "up" ? "var(--up)" : live?.status === "down" ? "var(--down)" : "var(--amber)"
 
   // All-time stats (from the first-check fetch) + live, for the Data & tools panel
   const at = allOutages?.summary
@@ -214,9 +228,8 @@ export default function App() {
             <Activity className="size-5" />
           </div>
           <div className="min-w-0">
-            <h1 className="text-lg font-semibold tracking-tight">
+            <h1 className="text-3xl font-semibold leading-none tracking-tight sm:text-5xl">
               Connection Watchman
-              <span className="hidden font-normal text-muted-foreground sm:inline"> - 24/7 Internet connection status monitoring</span>
             </h1>
           </div>
         </div>
@@ -227,6 +240,11 @@ export default function App() {
               <span className="inline-flex size-2 rounded-full" style={{ background: "var(--primary)" }} />
               DNS degraded
             </Badge>
+          )}
+          {meta?.first_ts && (
+            <span className="hidden text-xs text-foreground/80 sm:inline">
+              Scan running since {fmtSince(meta.first_ts)}
+            </span>
           )}
           <StatusBadge live={live} meta={meta} />
         </div>
@@ -273,13 +291,7 @@ export default function App() {
                   ) : btn
                 })}
               </div>
-              <span className="flex items-center gap-2.5 font-mono text-2xl font-bold leading-none tabular-nums text-foreground sm:ml-auto sm:text-4xl">
-                <span className="relative flex size-3 shrink-0">
-                  {live?.status === "up" && !meta?.paused && (
-                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full opacity-60" style={{ background: clockDot }} />
-                  )}
-                  <span className="relative inline-flex size-3 rounded-full" style={{ background: clockDot }} />
-                </span>
+              <span className="font-mono text-2xl font-bold leading-none tabular-nums text-foreground sm:ml-auto sm:text-4xl">
                 {nowTs.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true })}
               </span>
             </div>
@@ -295,9 +307,11 @@ export default function App() {
                 ))}
               </div>
             </div>
-            {/* inset matches LatencyChart's YAxis width (34) + right margin (12) so the axes align */}
-            <div className="pl-[34px] pr-3">
-              {data ? <Tracker data={data} hoverT={hoverT} onHoverT={setHoverT} fetchRange={fetchRange} /> : <Skeleton h={56} />}
+            {/* inset matches LatencyChart's YAxis width (34) + right margin (12) so the axes align.
+                Grows to absorb the card's slack so the uptime bars fill the space the shortened
+                latency chart leaves, instead of a gap. */}
+            <div className="flex grow flex-col pl-[34px] pr-3">
+              {data ? <Tracker data={data} hoverT={hoverT} onHoverT={setHoverT} fetchRange={fetchRange} /> : <Skeleton h={96} />}
               <div className="mt-2.5 flex justify-between font-mono text-xs text-muted-foreground">
                 <span>{data ? (wd ? fmtDate(data.start) : fmtTime(data.start)) : ""} <span className="opacity-60">(Local Time)</span></span>
                 <span>Now</span>
@@ -313,8 +327,8 @@ export default function App() {
                 </span>
               )}
             </div>
-            <div className="flex grow flex-col min-h-[210px]">
-              {data ? <LatencyChart data={data} hoverT={hoverT} onHoverT={setHoverT} /> : <Skeleton h={210} />}
+            <div className="flex flex-col h-[160px]">
+              {data ? <LatencyChart data={data} hoverT={hoverT} onHoverT={setHoverT} /> : <Skeleton h={160} />}
             </div>
           </Card>
         </div>
@@ -323,10 +337,10 @@ export default function App() {
       {/* Outages + tools */}
       <div className="grid grid-cols-1 items-stretch gap-4 lg:grid-cols-[1.7fr_1fr]">
         <Card className="p-4 sm:p-5">
-          <h2 className="mb-3 text-[0.95rem] font-semibold tracking-tight">Recent outages</h2>
+          <h2 className="mb-3 text-[0.95rem] font-semibold tracking-tight">Recent outages <span className="font-normal text-muted-foreground">(Past 24 hrs)</span></h2>
           {!allOutages ? <Skeleton h={120} />
             : netOutages.length
-              ? <><CauseLegend /><OutagesTimeline outages={netOutages} /></>
+              ? <><CauseLegend /><OutagesTimeline outages={netOutages} onSaveNote={saveOutageNote} onDelete={deleteOutage} /></>
               : <OutagesEmpty />}
         </Card>
 

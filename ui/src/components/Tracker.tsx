@@ -159,8 +159,8 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
   })() : null
 
   return (
-    <div className="relative">
-      <div ref={barRef} className="flex h-11 items-stretch gap-[2px] sm:h-14" role="img" aria-label="Uptime timeline">
+    <div className="relative flex grow flex-col">
+      <div ref={barRef} className="flex grow items-stretch gap-[2px] min-h-[64px] sm:min-h-[96px]" role="img" aria-label="Uptime timeline">
         {segs.map((s, i) => {
           const c = segColor(s)
           const hot = i === activeIdx

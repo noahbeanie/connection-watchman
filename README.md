@@ -4,9 +4,6 @@ A tiny, self-contained tool that runs 24/7 on any always-on computer, logs every
 internet connectivity check to a database, and serves a live mobile-friendly
 dashboard so you can see exactly how often (and why) your connection drops.
 
-Built for the "did the new router actually fix the dropouts, and when it drops
-is it my equipment or the ISP?" question.
-
 - **Zero dependencies.** Pure Python 3 standard library. No `pip install`,
   no virtualenv, nothing to break.
 - **Works offline.** The dashboard is inline SVG (no internet CDN), so it loads

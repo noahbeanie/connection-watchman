@@ -19,8 +19,10 @@ export interface Bucket {
   avg: number | null; min: number | null; max: number | null
 }
 export interface Outage {
+  id: number
   start: number; end: number | null; ongoing: boolean
   duration_s: number; duration_h: string; cause: string; kind: string
+  note: string | null
 }
 export interface Gap { start: number; end: number; kind: string }
 export interface RangeData {

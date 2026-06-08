@@ -330,6 +330,7 @@ def init_db(conn):
     _add_col(conn, "checks", "dns", "INTEGER")    # name resolution ok (1/0/NULL)
     _add_col(conn, "outages", "cause", "TEXT")    # local | isp | dns | unknown
     _add_col(conn, "outages", "kind", "TEXT")     # net (connectivity) | dns
+    _add_col(conn, "outages", "note", "TEXT")     # optional user-entered annotation
     # backfill: legacy DNS-caused outages become their own signal; the rest are
     # connectivity. This retroactively stops old DNS blips from counting as
     # downtime.

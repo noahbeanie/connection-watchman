@@ -261,7 +261,9 @@ def build_range(conn, start, end):
 
     has_cause = _has_col(conn, "outages", "cause")
     has_kind = _has_col(conn, "outages", "kind")
+    has_note = _has_col(conn, "outages", "note")
     cause_sel = "cause" if has_cause else "NULL AS cause"
+    note_sel = "note" if has_note else "NULL AS note"
     if has_kind:
         kind_sel = "kind"
     elif has_cause:
@@ -273,7 +275,7 @@ def build_range(conn, start, end):
     # kind 'net' = connectivity (counts toward uptime); kind 'dns' = a separate
     # name-resolution signal that never counts as downtime.
     raw = conn.execute(
-        f"""SELECT start_ts, end_ts, duration_s, {cause_sel}, {kind_sel} FROM outages
+        f"""SELECT id, start_ts, end_ts, duration_s, {cause_sel}, {kind_sel}, {note_sel} FROM outages
             WHERE start_ts < ? AND (end_ts IS NULL OR end_ts >= ?)
             ORDER BY start_ts DESC""",
         (end, start),
@@ -287,9 +289,11 @@ def build_range(conn, start, end):
         ongoing = row["end_ts"] is None
         o_end = now if ongoing else row["end_ts"]
         outages.append({
+            "id": row["id"],
             "start": row["start_ts"], "end": row["end_ts"], "ongoing": ongoing,
             "duration_s": o_end - row["start_ts"], "duration_h": fmt_dur(o_end - row["start_ts"]),
             "cause": row["cause"] or "unknown", "kind": kind,
+            "note": row["note"],
         })
         a, b = max(row["start_ts"], start), min(o_end, end)
         if kind == "dns":
@@ -523,8 +527,10 @@ class Handler(BaseHTTPRequestHandler):
         conn = db()
         has_cause = _has_col(conn, "outages", "cause")
         has_kind = _has_col(conn, "outages", "kind")
+        has_note = _has_col(conn, "outages", "note")
         conn.close()
         cause_sel = "cause" if has_cause else "NULL AS cause"
+        note_sel = "note" if has_note else "NULL AS note"
         if has_kind:
             kind_sel = "kind"
         elif has_cause:
@@ -540,13 +546,14 @@ class Handler(BaseHTTPRequestHandler):
             end_iso = "" if ongoing else iso(r["end_ts"])
             cause = r["cause"] or "unknown"
             kind = r["kind"] or "net"
+            note = (r["note"] or "").replace('"', '""').replace("\n", " ").replace("\r", " ")
             return (f'{r["id"]},{iso(r["start_ts"])},{end_iso},'
-                    f'{dur},{fmt_dur(dur)},{cause},{kind},{1 if ongoing else 0}\n')
+                    f'{dur},{fmt_dur(dur)},{cause},{kind},{1 if ongoing else 0},"{note}"\n')
 
         self._stream_csv(
             f"outages_{start}_{end}.csv",
-            "outage_id,start_time_utc,end_time_utc,duration_seconds,duration_human,cause,outage_type,is_ongoing",
-            f"SELECT id, start_ts, end_ts, duration_s, {cause_sel}, {kind_sel} FROM outages "
+            "outage_id,start_time_utc,end_time_utc,duration_seconds,duration_human,cause,outage_type,is_ongoing,note",
+            f"SELECT id, start_ts, end_ts, duration_s, {cause_sel}, {kind_sel}, {note_sel} FROM outages "
             "WHERE start_ts < ? AND (end_ts IS NULL OR end_ts >= ?) ORDER BY start_ts",
             (end, start), fmt,
         )
@@ -622,6 +629,58 @@ class Handler(BaseHTTPRequestHandler):
                                      "ON CONFLICT(k) DO UPDATE SET v=excluded.v", ("cfg_" + key, str(v)))
                     conn.execute("COMMIT")
                     self._send(200, json.dumps({"ok": True, **updates}), "application/json")
+                except sqlite3.OperationalError as e:
+                    self._send(503, json.dumps({"error": f"database busy: {e}"}), "application/json")
+                finally:
+                    conn.close()
+            elif parsed.path == "/api/outage/note":
+                try:
+                    oid = int(data.get("id"))
+                except (TypeError, ValueError):
+                    self._send(400, json.dumps({"error": "invalid id"}), "application/json")
+                    return
+                note = data.get("note")
+                note = "" if note is None else str(note)[:1000]
+                conn = db_rw()
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    if not _has_col(conn, "outages", "note"):
+                        conn.execute("ALTER TABLE outages ADD COLUMN note TEXT")
+                    cur = conn.execute("UPDATE outages SET note=? WHERE id=?", (note or None, oid))
+                    conn.execute("COMMIT")
+                    if cur.rowcount == 0:
+                        self._send(404, json.dumps({"error": "outage not found"}), "application/json")
+                    else:
+                        self._send(200, json.dumps({"ok": True, "id": oid, "note": note}), "application/json")
+                except sqlite3.OperationalError as e:
+                    self._send(503, json.dumps({"error": f"database busy: {e}"}), "application/json")
+                finally:
+                    conn.close()
+            elif parsed.path == "/api/outage/delete":
+                try:
+                    oid = int(data.get("id"))
+                except (TypeError, ValueError):
+                    self._send(400, json.dumps({"error": "invalid id"}), "application/json")
+                    return
+                conn = db_rw()
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    row = conn.execute("SELECT start_ts, end_ts FROM outages WHERE id=?", (oid,)).fetchone()
+                    if row is None:
+                        conn.execute("COMMIT")
+                        self._send(404, json.dumps({"error": "outage not found"}), "application/json")
+                        return
+                    if row["end_ts"] is None:
+                        conn.execute("COMMIT")
+                        self._send(400, json.dumps({"error": "can't delete an ongoing outage"}), "application/json")
+                        return
+                    # The internet was actually fine (e.g. a modem reset): mark the down checks
+                    # in this window back to online, then drop the outage entirely.
+                    conn.execute("UPDATE checks SET up=1 WHERE ts>=? AND ts<=? AND up=0",
+                                 (row["start_ts"], row["end_ts"]))
+                    conn.execute("DELETE FROM outages WHERE id=?", (oid,))
+                    conn.execute("COMMIT")
+                    self._send(200, json.dumps({"ok": True, "id": oid}), "application/json")
                 except sqlite3.OperationalError as e:
                     self._send(503, json.dumps({"error": f"database busy: {e}"}), "application/json")
                 finally:

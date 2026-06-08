@@ -1,12 +1,32 @@
 import { useEffect, useRef } from "react"
 import { createPortal } from "react-dom"
-import { Area, AreaChart, CartesianGrid, ReferenceLine, XAxis, YAxis } from "recharts"
+import { Area, AreaChart, CartesianGrid, ReferenceArea, ReferenceLine, XAxis, YAxis } from "recharts"
 import { ChartContainer, ChartTooltip } from "@/components/ui/chart"
 import type { ChartConfig } from "@/components/ui/chart"
-import { fmtTime } from "@/lib/format"
+import { fmtTime, latencyFence } from "@/lib/format"
 import type { RangeData } from "@/lib/types"
 
 const config = { avg: { label: "Latency", color: "var(--lat-line)" } } satisfies ChartConfig
+
+// Time spans (seconds) of connectivity outages, to shade red on the latency chart. A bucket
+// is an outage when some or all of its checks were down (up < total); no-data gaps (total 0)
+// and fence-hidden latency spikes (fully up) are not outages. Adjacent outage buckets merge.
+function outageSpans(buckets: RangeData["buckets"], bucket: number): { x1: number; x2: number }[] {
+  const spans: { x1: number; x2: number }[] = []
+  let start: number | null = null
+  let end = 0
+  for (const b of buckets) {
+    if (b.total > 0 && b.up < b.total) {
+      if (start == null) start = b.t
+      end = b.t + bucket
+    } else if (start != null) {
+      spans.push({ x1: start, x2: end })
+      start = null
+    }
+  }
+  if (start != null) spans.push({ x1: start, x2: end })
+  return spans
+}
 
 export function LatencyChart({ data, hoverT, onHoverT }: {
   data: RangeData
@@ -22,21 +42,38 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
     return () => window.removeEventListener("scroll", onScroll, true)
   }, [onHoverT])
   const wd = data.end - data.start > 86400
-  // Latency only means something when the connection was fully up. During a partial outage
-  // the few surviving connects are crawling near the timeout, which would spike the line; null
-  // those (and fully-down buckets) so the line gaps over outages instead of spiking.
-  const points = data.buckets.map((b) => ({ t: b.t + data.bucket / 2, avg: b.up === b.total ? b.avg : null, up: b.up, total: b.total }))
+  // Latency only means something when the connection was fully up. During a partial outage the
+  // few surviving connects crawl near the timeout, which would spike the line; null those (and
+  // fully-down buckets). We also drop fully-up-but-outlier buckets past a robust fence (a
+  // degraded-but-connected stretch near the timeout) so it can't blow out the reversed Y axis.
+  const fence = latencyFence(
+    data.buckets.filter((b) => b.total > 0 && b.up === b.total && b.avg != null).map((b) => b.avg as number),
+  )
+  const points = data.buckets.map((b) => ({
+    t: b.t + data.bucket / 2,
+    avg: b.up === b.total && b.avg != null && b.avg <= fence ? b.avg : null,
+    up: b.up,
+    total: b.total,
+  }))
   const valued = points.filter((p): p is { t: number; avg: number; up: number; total: number } => p.avg != null)
   const lats = valued.map((p) => p.avg)
 
   if (!lats.length) {
     return (
-      <div className="flex grow min-h-[210px] items-center justify-center text-sm text-muted-foreground">
+      <div className="flex grow min-h-[150px] items-center justify-center text-sm text-muted-foreground">
         No latency samples in this range.
       </div>
     )
   }
   const maxL = Math.max(20, Math.ceil(Math.max(...lats) / 10) * 10)
+
+  // Red outage bands, clamped to the plotted time domain (mid-bucket points) so they never
+  // fall outside the axis and get dropped.
+  const tMin = points[0].t
+  const tMax = points[points.length - 1].t
+  const bands = outageSpans(data.buckets, data.bucket)
+    .map((b) => ({ x1: Math.max(b.x1, tMin), x2: Math.min(b.x2, tMax) }))
+    .filter((b) => b.x2 > b.x1)
 
   // Least-squares trend line, colored by direction: rising latency (worse) is
   // red, falling (better) is green, roughly flat is neutral amber.
@@ -77,7 +114,7 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
   }
 
   return (
-    <div ref={wrapRef} className="relative flex grow flex-col min-h-[210px]">
+    <div ref={wrapRef} className="relative flex grow flex-col min-h-[150px]">
       <ChartContainer config={config} className="min-h-0 w-full grow">
         <AreaChart
           data={points} margin={{ left: 0, right: 12, top: 10, bottom: 0 }}
@@ -124,6 +161,11 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
           />
           {/* Keep a tooltip so Recharts computes the active point for onMouseMove, but render nothing. */}
           <ChartTooltip cursor={false} content={() => null} />
+          {/* Half-transparent red bands over connectivity outages (where the latency line gaps). */}
+          {bands.map((b, i) => (
+            <ReferenceArea key={`outage-${i}`} x1={b.x1} x2={b.x2}
+              fill="var(--down)" fillOpacity={0.3} stroke="none" ifOverflow="visible" />
+          ))}
           {trend && (
             <ReferenceLine
               segment={[{ x: trend.x0, y: trend.y0 }, { x: trend.x1, y: trend.y1 }]}
