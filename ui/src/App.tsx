@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
-  Activity, Download, Pause, Play, Siren, Trash2, TrendingDown, TrendingUp,
+  Download, Pause, Play, Siren, Trash2, TrendingDown, TrendingUp,
 } from "lucide-react"
 import { toast } from "sonner"
 import { Card } from "@/components/ui/card"
@@ -25,6 +25,7 @@ import type { Live, Meta, RangeData } from "@/lib/types"
 import {
   PRESETS, defaultPreset, fmtDate, fmtDur, fmtRangeShort, fmtSince, fmtStreak, fmtTime, humanBytes, latencyFence, nowSec, pctText, resolverName,
 } from "@/lib/format"
+import watchmanLogo from "@/assets/watchman.png"
 
 const api = async (p: string) => (await fetch(p, { cache: "no-store" })).json()
 const post = (p: string, body: unknown) =>
@@ -260,13 +261,20 @@ export default function App() {
       <Toaster richColors position="bottom-center" />
 
       <header className="mb-6 flex items-center justify-between gap-4">
-        <div className="flex min-w-0 items-center gap-3">
-          <div className="flex size-9 shrink-0 items-center justify-center rounded-xl text-white shadow-lg shadow-primary/20"
-            style={{ background: "linear-gradient(140deg, var(--primary), var(--up))" }}>
-            <Activity className="size-5" />
-          </div>
+        <div className="flex min-w-0 items-end gap-3">
+          <img src={watchmanLogo} alt="Connection Watchman logo"
+            className="size-20 shrink-0 rounded-xl object-cover shadow-lg shadow-black/40 sm:size-24" />
           <div className="min-w-0">
-            <h1 className="text-3xl font-semibold leading-none tracking-tight text-muted-foreground sm:text-5xl">
+            <h1
+              className="text-3xl font-bold leading-none tracking-tight sm:text-5xl"
+              style={{
+                fontFamily: "'Space Grotesk Variable', sans-serif",
+                color: "#000000",
+                WebkitTextFillColor: "#000000",       // black interior
+                WebkitTextStroke: "1px #c8c8ce",      // thin light-grey border
+                textShadow: "0 0 6px rgba(255,255,255,0.17), 0 0 16px rgba(255,255,255,0.08)",
+              }}
+            >
               Connection Watchman
             </h1>
           </div>

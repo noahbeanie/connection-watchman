@@ -4,11 +4,11 @@
 #   Remotely:  irm https://raw.githubusercontent.com/noahbeanie/connection-watchman/main/install.ps1 | iex
 #
 # Registers the monitor + dashboard as always-on Scheduled Tasks that run at boot
-# as SYSTEM (even when logged out). Pure Python 3 stdlib, no pip.
+# as your user, non-elevated (even when logged out). Pure Python 3 stdlib, no pip.
 $ErrorActionPreference = "Stop"
 $Repo = "https://github.com/noahbeanie/connection-watchman.git"
 
-# Need admin to register SYSTEM tasks that start at boot.
+# Need admin to register boot-start scheduled tasks (the tasks themselves run non-elevated).
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 if (-not $admin) {
   Write-Host "Please run this in an ADMIN PowerShell (right-click Windows Terminal / PowerShell > Run as administrator), then re-run."
@@ -54,19 +54,22 @@ if ($existing) {
     try { $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Any, $p); $l.Start(); $l.Stop(); $Port = $p; break } catch { }
   }
 }
-# The SYSTEM scheduled task inherits machine env vars; persist the chosen port.
+# The scheduled task inherits machine env vars; persist the chosen port.
 [Environment]::SetEnvironmentVariable("UPTIME_PORT", "$Port", "Machine")
 
 Write-Host "App:    $Dir"
 Write-Host "Python: $py"
 Write-Host "Port:   $Port"
 
-# Register two always-on tasks (start at boot as SYSTEM, restart on failure, no time limit).
+# Register two always-on tasks that start at boot and run as you, NON-elevated (least
+# privilege: the tool only needs local sockets and its own folder, never admin rights). S4U
+# lets them run whether or not you are logged in, without storing a password.
+$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 foreach ($svc in @("monitor","dashboard")) {
   $name     = "Connection Watchman $svc"
   $action   = New-ScheduledTaskAction -Execute $py -Argument "$svc.py" -WorkingDirectory $Dir
   $trigger  = New-ScheduledTaskTrigger -AtStartup
-  $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+  $principal = New-ScheduledTaskPrincipal -UserId $me -LogonType S4U -RunLevel Limited
   $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
               -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
   Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null

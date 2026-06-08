@@ -396,8 +396,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _resolve_range(self, q, conn, now):
-        start = int(q.get("start", [0])[0])
-        end = int(q.get("end", [now])[0])
+        def _int(vals, d):
+            try:
+                return int(vals[0])
+            except (TypeError, ValueError, IndexError):
+                return d
+        start = _int(q.get("start", [0]), 0)
+        end = _int(q.get("end", [now]), now)
         if start <= 0:
             fts = first_ts(conn)
             start = fts if fts is not None else now - 3600
@@ -435,8 +440,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(404, "UI not built", "text/plain")
             return
         rel = path.lstrip("/") or "index.html"
-        target = os.path.normpath(os.path.join(WEB_DIR, rel))
-        if not target.startswith(os.path.normpath(WEB_DIR)):
+        web_root = os.path.normpath(WEB_DIR)
+        target = os.path.normpath(os.path.join(web_root, rel))
+        # Confine to web_root: equal to it, or a path strictly beneath it (the trailing
+        # separator stops a sibling like web_tmp/ from passing a bare prefix check).
+        if target != web_root and not target.startswith(web_root + os.sep):
             self._send(403, "forbidden", "text/plain")
             return
         if not os.path.isfile(target):
@@ -449,6 +457,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "public, max-age=31536000, immutable" if "/assets/" in path else "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _csrf_ok(self):
+        # Block cross-site POSTs (CSRF): browsers always attach an Origin header on POST, so a
+        # request whose Origin host:port doesn't match this server's Host is cross-origin and is
+        # rejected. Requests with no Origin (curl / scripts, never browsers) are allowed through.
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        return urlparse(origin).netloc == self.headers.get("Host", "")
 
     def do_GET(self):
         try:
@@ -500,7 +517,8 @@ class Handler(BaseHTTPRequestHandler):
         except FileNotFoundError:
             self._send(503, "no database yet, is monitor.py running?", "text/plain")
         except Exception as e:  # noqa
-            self._send(500, f"error: {e}", "text/plain")
+            print(f"[dashboard] GET {self.path} failed: {e}", flush=True)
+            self._send(500, "internal error", "text/plain")
 
     # CSV exports kept as explicit methods (schema-aware, streamed)
     def _export_checks(self, start, end):
@@ -546,7 +564,10 @@ class Handler(BaseHTTPRequestHandler):
             end_iso = "" if ongoing else iso(r["end_ts"])
             cause = r["cause"] or "unknown"
             kind = r["kind"] or "net"
-            note = (r["note"] or "").replace('"', '""').replace("\n", " ").replace("\r", " ")
+            note = r["note"] or ""
+            if note[:1] in ("=", "+", "-", "@", "\t"):
+                note = "'" + note            # neutralize spreadsheet formula injection
+            note = note.replace('"', '""').replace("\n", " ").replace("\r", " ")
             return (f'{r["id"]},{iso(r["start_ts"])},{end_iso},'
                     f'{dur},{fmt_dur(dur)},{cause},{kind},{1 if ongoing else 0},"{note}"\n')
 
@@ -561,6 +582,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             parsed = urlparse(self.path)
+            if not self._csrf_ok():
+                self._send(403, json.dumps({"error": "cross-origin request blocked"}), "application/json")
+                return
             length = int(self.headers.get("Content-Length", 0) or 0)
             raw = self.rfile.read(length) if length else b""
             try:
@@ -691,7 +715,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._send(404, "not found", "text/plain")
         except Exception as e:  # noqa
-            self._send(500, f"error: {e}", "text/plain")
+            print(f"[dashboard] POST {self.path} failed: {e}", flush=True)
+            self._send(500, "internal error", "text/plain")
 
 
 def main():
