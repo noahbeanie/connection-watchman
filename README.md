@@ -217,6 +217,29 @@ then `sudo systemctl daemon-reload && sudo systemctl restart uptime-monitor`.
 | `UPTIME_RETENTION_DAYS` | `365` | Raw per-check rows older than this are trimmed hourly. |
 | `UPTIME_PORT`     | `8080`  | Dashboard web port. |
 | `UPTIME_DB`       | `./uptime.db` | Where the log lives. |
+| `UPTIME_FWMARK`   | `0` (off) | Firewall mark applied to probe sockets so they bypass a VPN running on this machine and test your **direct** link (see below). Needs `CAP_NET_ADMIN`. |
+
+### Running on a machine that also runs a VPN
+
+If the monitoring machine runs a always-on VPN (WireGuard, NordVPN/NordLynx, etc.), its
+policy routing usually forces *all* outbound traffic, including the connectivity probe, through
+the tunnel. The monitor then measures "is the internet reachable via the VPN," which can stay up
+through Nord's servers even when your real connection (the path your other devices use) is down,
+so genuine outages get missed.
+
+To make the probe test the **direct** path instead, give it the VPN's bypass mark. For NordVPN
+(NordLynx) the mark is `0xe1f1`; add a systemd drop-in:
+
+```bash
+sudo mkdir -p /etc/systemd/system/uptime-monitor.service.d
+printf '[Service]\nAmbientCapabilities=CAP_NET_ADMIN\nEnvironment=UPTIME_FWMARK=0xe1f1\n' \
+  | sudo tee /etc/systemd/system/uptime-monitor.service.d/override.conf
+sudo systemctl daemon-reload && sudo systemctl restart uptime-monitor
+```
+
+Confirm it worked: probe latency should drop to your normal direct figure (the VPN's extra hop
+disappears). Find your VPN's mark with `ip rule show` (look for the `lookup <table>` rule the VPN
+adds). Your other (non-probe) traffic stays on the VPN.
 
 ## Database size
 

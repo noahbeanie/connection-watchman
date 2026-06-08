@@ -13,6 +13,10 @@ RestartSec=5
 # Optional overrides:
 # Environment=UPTIME_INTERVAL=5
 # Environment=UPTIME_DB=/home/pi/pi-uptime-monitor/uptime.db
+# If this machine runs a VPN, route the probe OUTSIDE the tunnel so it tests the direct link
+# (otherwise it measures the VPN path). Find your VPN's bypass mark via `ip rule show`:
+# AmbientCapabilities=CAP_NET_ADMIN
+# Environment=UPTIME_FWMARK=0xe1f1   # NordVPN / NordLynx
 
 [Install]
 WantedBy=multi-user.target

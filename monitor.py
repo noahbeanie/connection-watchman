@@ -76,6 +76,15 @@ TIMEOUT_MS_DEFAULT = 1000
 CONFIRM_RETRIES = int(os.environ.get("UPTIME_CONFIRM_RETRIES", "3"))  # extra tries before "down"
 RETRY_GAP = float(os.environ.get("UPTIME_RETRY_GAP", "1.0"))   # seconds between confirm tries
 PAUSE_FILE = os.path.join(BASE, "PAUSED")
+# Optional firewall mark applied to probe sockets so they BYPASS a policy-routed VPN on the host
+# and test the DIRECT path your other devices use (otherwise the probe measures the VPN tunnel, not
+# your ISP link). 0 = off (default; portable). When set (e.g. NordVPN's bypass mark 0xe1f1) the
+# service needs CAP_NET_ADMIN to apply SO_MARK. Parsed base-0 so "0x..." or decimal both work.
+try:
+    FWMARK = int(os.environ.get("UPTIME_FWMARK", "0") or "0", 0)
+except ValueError:
+    FWMARK = 0
+SO_MARK = getattr(socket, "SO_MARK", 36)   # 36 on Linux; only used when FWMARK is set
 
 # Plain-English phrase for a connectivity cause, used in alert messages.
 CAUSE_PHRASE = {
@@ -126,6 +135,24 @@ def _now():
 
 
 # ---- probes -----------------------------------------------------------------
+def _connect_direct(host, port, timeout):
+    """TCP connect with the bypass fwmark set, so a policy-routed VPN on the host doesn't capture
+    the probe and we test the direct path. Raises OSError on failure (like create_connection)."""
+    last = None
+    for af, st, proto, _cn, sa in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM):
+        s = socket.socket(af, st, proto)
+        try:
+            s.setsockopt(socket.SOL_SOCKET, SO_MARK, FWMARK)
+            s.settimeout(timeout)
+            s.connect(sa)
+            return
+        except OSError as e:
+            last = e
+        finally:
+            s.close()
+    raise last or OSError("getaddrinfo returned no addresses")
+
+
 def check_once(targets=TARGETS, timeout=TIMEOUT):
     """Return (up: bool, latency_ms: float|None). Short-circuits: returns as soon
     as ANY target answers WITHIN `timeout`, so a connection that can only respond
@@ -133,8 +160,11 @@ def check_once(targets=TARGETS, timeout=TIMEOUT):
     for host, port in targets:
         start = time.monotonic()
         try:
-            with socket.create_connection((host, port), timeout=timeout):
-                pass
+            if FWMARK:
+                _connect_direct(host, port, timeout)   # bypass a host VPN -> test the direct path
+            else:
+                with socket.create_connection((host, port), timeout=timeout):
+                    pass
             return True, (time.monotonic() - start) * 1000.0
         except (OSError, UnicodeError):
             # UnicodeError (e.g. an over-long DNS label in a custom target) is NOT an OSError;
@@ -183,6 +213,8 @@ def _dns_query_udp(resolver, host, timeout):
         pkt = header + qname + struct.pack(">HH", 1, 1)             # QTYPE=A, QCLASS=IN
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
+            if FWMARK:
+                s.setsockopt(socket.SOL_SOCKET, SO_MARK, FWMARK)   # bypass a host VPN, like the TCP probe
             s.settimeout(timeout)
             s.sendto(pkt, (resolver, 53))
             data, _ = s.recvfrom(512)
