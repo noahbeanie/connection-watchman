@@ -9,6 +9,10 @@ uptime_test.db
 uptime_test.db-wal
 uptime_test.db-shm
 
+# Dev-only local helpers (kept on the dev machine, not shipped / not in the repo)
+seed_test_db.py
+_preview_server.py
+
 # Python
 __pycache__/
 *.pyc

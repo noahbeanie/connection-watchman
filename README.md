@@ -177,7 +177,6 @@ defaults. The monitor picks up changes within a cycle.
 | `templates/dashboard.html` | Legacy single-file UI, served only as a fallback if `web/` is missing. |
 | `install.sh` / `install.ps1` | Set up the always-on services with your paths baked in (Linux/macOS, Windows). |
 | `uptime-*.service`         | Reference systemd unit files (the installer generates real ones). |
-| `seed_test_db.py`          | Dev only, builds a synthetic DB for local UI testing. Not deployed. |
 
 ## Upgrading an existing install
 
