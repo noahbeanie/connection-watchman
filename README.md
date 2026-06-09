@@ -2,7 +2,9 @@
 
 A self-contained tool that runs 24/7 on an always-on machine, logs every internet
 connectivity check to SQLite, and serves a live, mobile-friendly dashboard showing how
-often, and why, your connection drops.
+often, and why, your connection drops. Built for holding a flaky ISP accountable: every
+outage is logged with its cause, duration, and exact timestamp, so you can back a support
+ticket or refund claim with hard data instead of "it feels slow."
 
 - **Zero dependencies.** Pure Python 3 standard library. Nothing to `pip install`.
 - **Works offline.** The dashboard ships its own assets (no CDN), so it loads during an outage.
