@@ -289,12 +289,12 @@ export default function App() {
     <>
       <Toaster richColors position="bottom-center" />
       <div className="app-shell mx-auto max-w-[1180px] px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
-        <header className="mb-6 flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
-          <div className="flex min-w-0 items-end gap-3">
+        <header className="mb-6 flex items-center justify-between gap-2 sm:gap-4">
+          <div className="flex min-w-0 items-end gap-2 sm:gap-3">
             <img src={watchmanLogo} alt="Connection Watchman logo"
               className="size-20 shrink-0 rounded-xl object-cover shadow-lg shadow-black/40 sm:size-24" />
             <div className="min-w-0">
-              <h1 className="wordmark break-words text-3xl font-bold leading-[1.1] tracking-tight sm:text-5xl sm:leading-none">
+              <h1 className="wordmark break-words text-2xl font-bold leading-[1.1] tracking-tight sm:text-5xl sm:leading-none">
                 Connection Watchman
               </h1>
             </div>
