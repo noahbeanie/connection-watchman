@@ -387,26 +387,34 @@ export default function App() {
           </div>
         </div>
 
-        {/* Outages + tools */}
+        {/* Notifications + outages (left column) | data & tools (right column) */}
         <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[1.7fr_1fr]">
-          <Card className="p-4 sm:p-5">
-            <h2 className="mb-3 text-[0.95rem] font-semibold tracking-tight">
-              Outages <span className="font-normal text-muted-foreground">({periodLabel})</span>
-            </h2>
-            {!data ? <Skeleton h={120} />
-              : rangeNet.length
-                ? <>
-                    <CauseLegend />
-                    <OutagesTimeline outages={shownOut} onSaveNote={saveOutageNote} onDelete={deleteOutage} />
-                    {rangeNet.length > 30 && (
-                      <button type="button" onClick={() => setShowAllOut((v) => !v)}
-                        className="mt-4 ml-1 text-xs font-medium text-primary transition hover:underline">
-                        {showAllOut ? "Show fewer" : `Show all ${rangeNet.length}`}
-                      </button>
-                    )}
-                  </>
-                : <OutagesEmpty />}
-          </Card>
+          <div className="flex flex-col gap-4">
+            {meta && (
+              <Card className="p-4 sm:p-5">
+                <h2 className="mb-3 text-[0.95rem] font-semibold tracking-tight">Notify me when my connection returns</h2>
+                <AlertSettings alerts={meta.alerts} onSaved={refetchMeta} />
+              </Card>
+            )}
+            <Card className="p-4 sm:p-5">
+              <h2 className="mb-3 text-[0.95rem] font-semibold tracking-tight">
+                Outages <span className="font-normal text-muted-foreground">({periodLabel})</span>
+              </h2>
+              {!data ? <Skeleton h={120} />
+                : rangeNet.length
+                  ? <>
+                      <CauseLegend />
+                      <OutagesTimeline outages={shownOut} onSaveNote={saveOutageNote} onDelete={deleteOutage} />
+                      {rangeNet.length > 30 && (
+                        <button type="button" onClick={() => setShowAllOut((v) => !v)}
+                          className="mt-4 ml-1 text-xs font-medium text-primary transition hover:underline">
+                          {showAllOut ? "Show fewer" : `Show all ${rangeNet.length}`}
+                        </button>
+                      )}
+                    </>
+                  : <OutagesEmpty />}
+            </Card>
+          </div>
 
           <Card className="p-4 sm:p-5">
             <h2 className="mb-3 text-[0.95rem] font-semibold tracking-tight">Data &amp; tools</h2>
@@ -447,13 +455,6 @@ export default function App() {
                 <div className="mt-1.5 px-0.5">
                   <TargetsPopover targets={meta.targets} custom={meta.targets_custom} onSaved={refetchMeta} />
                 </div>
-              </div>
-            )}
-
-            {meta && (
-              <div className="mb-4 border-t border-border/40 pt-3">
-                {sectionHeader("Alerts")}
-                <AlertSettings alerts={meta.alerts} onSaved={refetchMeta} />
               </div>
             )}
 

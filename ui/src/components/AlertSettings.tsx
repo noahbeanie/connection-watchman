@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
-import { Bell, Send } from "lucide-react"
+import { Send } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import type { AlertConfig } from "@/lib/types"
@@ -54,10 +54,6 @@ export function AlertSettings({ alerts, onSaved }: { alerts: AlertConfig; onSave
 
   return (
     <div className="space-y-2.5 text-xs">
-      <div className="flex items-center gap-2">
-        <Bell className="size-3.5 text-muted-foreground" />
-        <span className="font-medium text-foreground">Notify me when my connection returns</span>
-      </div>
       <div className="flex flex-wrap items-center gap-2">
         <select
           value={type} onChange={(e) => setType(e.target.value)} style={{ colorScheme: "dark" }}
