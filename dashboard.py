@@ -220,12 +220,19 @@ def get_live(conn, now):
     status = "unknown" if age > stale_after else ("up" if up else "down")
     dns_ok = None if latest["dns"] is None else bool(latest["dns"])
 
-    # walk back to where the current connectivity state began
-    streak_since = latest["ts"]
-    for row in conn.execute("SELECT ts, up FROM checks ORDER BY ts DESC LIMIT 50000"):
-        if bool(row["up"]) != up:
-            break
-        streak_since = row["ts"]
+    # Where the current connectivity state began: the newest check with the OPPOSITE
+    # state (a reverse scan of the ts primary-key index that stops at the first flip,
+    # all in SQLite - no rows shipped to Python), then the first check after it.
+    flip = conn.execute(
+        "SELECT ts FROM checks WHERE up != ? ORDER BY ts DESC LIMIT 1",
+        (1 if up else 0,),
+    ).fetchone()
+    if flip is None:   # never flipped: streak spans the whole log
+        first = conn.execute("SELECT MIN(ts) m FROM checks").fetchone()
+        streak_since = first["m"] if first and first["m"] is not None else latest["ts"]
+    else:
+        nxt = conn.execute("SELECT MIN(ts) m FROM checks WHERE ts > ?", (flip["ts"],)).fetchone()
+        streak_since = nxt["m"] if nxt and nxt["m"] is not None else latest["ts"]
     streak_s = now - streak_since
 
     return {
@@ -310,12 +317,21 @@ def build_range(conn, start, end):
     outages = []
     net_iv, dns_iv = [], []
     net_count, dns_count = 0, 0
+    # Aggregates over ALL overlapping outages (the JSON list below is capped at 200, so
+    # the client must never derive stats from it): mean time to recover and the most
+    # recent outage start.
+    mttr_sum, mttr_n, last_outage_start = 0, 0, None
     for row in raw:
         kind = row["kind"] or "net"
         if kind in ("slow", "unstable"):   # removed quality signals; ignore any legacy rows
             continue
         ongoing = row["end_ts"] is None
         o_end = now if ongoing else row["end_ts"]
+        if not ongoing:
+            mttr_sum += o_end - row["start_ts"]
+            mttr_n += 1
+        if last_outage_start is None or row["start_ts"] > last_outage_start:
+            last_outage_start = row["start_ts"]
         outages.append({
             "id": row["id"],
             "start": row["start_ts"], "end": row["end_ts"], "ongoing": ongoing,
@@ -362,6 +378,8 @@ def build_range(conn, start, end):
             "dns_events": dns_count,                # DNS-only breakdown
             "dns_seconds": dns_seconds,
             "dns_h": fmt_dur(dns_seconds),
+            "mttr_s": (mttr_sum / mttr_n) if mttr_n else None,   # mean time to recover (completed outages)
+            "last_outage_start": last_outage_start,
             "avg_lat": round(s["avg_lat"], 1) if s["avg_lat"] is not None else None,
             "min_lat": round(s["min_lat"], 1) if s["min_lat"] is not None else None,
             "max_lat": round(s["max_lat"], 1) if s["max_lat"] is not None else None,
@@ -789,7 +807,7 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     conn.close()
             elif parsed.path == "/api/alerts":
-                atype = str(data.get("type", "ntfy"))
+                atype = str(data.get("type", "discord"))
                 if atype not in ALERT_TYPES:
                     self._send(400, json.dumps({"error": "invalid alert type"}), "application/json")
                     return
@@ -822,7 +840,7 @@ class Handler(BaseHTTPRequestHandler):
                         r = conn.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
                         return (r["v"] if r else d) or d
                     url = mv("cfg_alert_url", "")
-                    atype = mv("cfg_alert_type", "ntfy")
+                    atype = mv("cfg_alert_type", "discord")
                 finally:
                     conn.close()
                 if not url:

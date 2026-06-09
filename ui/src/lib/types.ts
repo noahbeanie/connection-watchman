@@ -14,6 +14,8 @@ export interface Summary {
   avg_lat: number | null
   min_lat: number | null
   max_lat: number | null
+  mttr_s: number | null            // mean time to recover, over ALL completed outages in range
+  last_outage_start: number | null // start ts of the most recent outage in range
 }
 export interface Bucket {
   t: number; total: number; up: number; pct: number | null

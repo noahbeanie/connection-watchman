@@ -1,18 +1,22 @@
+# NOTE: install.sh generates and installs this unit automatically (with your user,
+# Python, and install path filled in) - this file is only a template for a MANUAL
+# install. Replace YOUR_USER and /path/to/connection-watchman, then:
+#   sudo cp uptime-monitor.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now uptime-monitor
 [Unit]
-Description=Internet uptime monitor (logging daemon)
+Description=Connection Watchman internet monitor (logging daemon)
 After=network.target
 
 [Service]
 Type=simple
-# Edit User and paths if you didn't use the default pi user / location.
-User=pi
-WorkingDirectory=/home/pi/pi-uptime-monitor
-ExecStart=/usr/bin/python3 /home/pi/pi-uptime-monitor/monitor.py
+User=YOUR_USER
+WorkingDirectory=/path/to/connection-watchman
+ExecStart=/usr/bin/python3 /path/to/connection-watchman/monitor.py
 Restart=always
 RestartSec=5
 # Optional overrides:
 # Environment=UPTIME_INTERVAL=5
-# Environment=UPTIME_DB=/home/pi/pi-uptime-monitor/uptime.db
+# Environment=UPTIME_DB=/path/to/connection-watchman/uptime.db
 # If this machine runs a VPN, route the probe OUTSIDE the tunnel so it tests the direct link
 # (otherwise it measures the VPN path). Find your VPN's bypass mark via `ip rule show`:
 # AmbientCapabilities=CAP_NET_ADMIN

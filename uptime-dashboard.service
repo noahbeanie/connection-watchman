@@ -1,12 +1,17 @@
+# NOTE: install.sh generates and installs this unit automatically (with your user,
+# Python, and install path filled in) - this file is only a template for a MANUAL
+# install. Replace YOUR_USER and /path/to/connection-watchman, then:
+#   sudo cp uptime-dashboard.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now uptime-dashboard
 [Unit]
-Description=Internet uptime dashboard (web UI)
+Description=Connection Watchman dashboard (web UI)
 After=network.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/pi-uptime-monitor
-ExecStart=/usr/bin/python3 /home/pi/pi-uptime-monitor/dashboard.py
+User=YOUR_USER
+WorkingDirectory=/path/to/connection-watchman
+ExecStart=/usr/bin/python3 /path/to/connection-watchman/dashboard.py
 Restart=always
 RestartSec=5
 # Environment=UPTIME_PORT=8080

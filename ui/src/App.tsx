@@ -189,7 +189,11 @@ export default function App() {
     if (res.ok) { await Promise.allSettled([refetchMeta(), loadRange(), loadOutages()]); toast.success("Outage removed; that time is now marked online") }
     else toast.error("Could not delete outage: " + (await res.text()))
   }
-  const exportUrl = (kind: string) => { const { start, end } = windowFor(preset); return `/api/export/${kind}.csv?start=${start}&end=${end}` }
+  const exportUrl = (kind: string) => {
+    // Same range resolution as loadRange, so a custom range exports exactly what's on screen.
+    const { start, end } = preset === "custom" && customRange ? customRange : windowFor(preset)
+    return `/api/export/${kind}.csv?start=${start}&end=${end}`
+  }
   const exportData = () => { download(exportUrl("checks")); setTimeout(() => download(exportUrl("outages")), 400) }
 
   const availSecs = meta?.first_ts ? nowSec() - meta.first_ts : 0
@@ -225,12 +229,13 @@ export default function App() {
     : live?.status === "down" ? "Offline" : meta?.paused ? "Paused" : "—"
   const upStreakColor = live?.status === "up" ? "var(--up)" : live?.status === "down" ? "var(--down)" : "var(--muted-foreground)"
 
-  // All-time stats (from the first-check fetch) + live, for the Data & tools panel
+  // All-time stats (from the first-check fetch) + live, for the Data & tools panel.
+  // MTTR / last outage come from server-side aggregates over ALL outages — the outages
+  // array is capped at 200 rows, so deriving stats from it would silently truncate.
   const at = allOutages?.summary
-  const doneOut = allOutages ? allOutages.outages.filter((o) => (o.kind === "net" || o.kind === "dns") && !o.ongoing) : []
-  const mttr = doneOut.length ? doneOut.reduce((a, o) => a + o.duration_s, 0) / doneOut.length : null
+  const mttr = at?.mttr_s ?? null
   const mtbf = at && at.outage_count > 0 ? at.monitored_seconds / at.outage_count : null
-  const lastOut = allOutages?.outages.find((o) => o.kind === "net" || o.kind === "dns")
+  const lastOut = at?.last_outage_start ?? null
   const liveLat = live?.latency_ms != null ? `${live.latency_ms} ms` : live?.status === "down" ? "Offline" : "—"
   const dataSections: { title: string; rows: { label: string; hint: ReactNode; value?: ReactNode; control?: ReactNode }[] }[] = meta
     ? [
@@ -242,7 +247,7 @@ export default function App() {
             { label: "Total checks", value: at ? at.checks.toLocaleString() : "—", hint: "Number of connectivity checks recorded." },
             { label: "Avg recovery", value: mttr != null ? fmtDur(mttr) : "No outages", hint: "Mean time to recover: the average length of a connectivity outage." },
             { label: "Between outages", value: mtbf != null ? fmtDur(mtbf) : "No outages", hint: "Mean time between failures: monitored time divided by the number of outages." },
-            { label: "Last outage", value: lastOut ? fmtTime(lastOut.start, true) : "None recorded", hint: "When the most recent connectivity outage began." },
+            { label: "Last outage", value: lastOut != null ? fmtTime(lastOut, true) : "None recorded", hint: "When the most recent connectivity outage began." },
           ],
         },
         {

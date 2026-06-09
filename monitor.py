@@ -120,6 +120,8 @@ CAUSE_SEVERITY = {"unknown": 0, "isp": 2, "local": 3}
 
 _running = True
 _gateway = "unset"   # cached discovery result
+_gateway_checked = 0.0   # monotonic time of the last discovery attempt
+GW_REDISCOVER_S = 300    # re-discover the gateway at most this often (router IP can change)
 
 
 def _now():
@@ -323,18 +325,29 @@ def _gw_from_windows():
 
 def discover_gateway():
     """Gateway IP: env override, else the OS-appropriate default-route lookup, else None.
-    Gateway is optional - if it can't be found, outages are classified as 'unknown'."""
-    global _gateway
-    if _gateway != "unset":
-        return _gateway
+    Gateway is optional - if it can't be found, outages are classified as 'unknown'.
+
+    Re-discovered every GW_REDISCOVER_S (the router IP can change: DHCP, a new router),
+    so cause classification doesn't probe a stale address until the daemon restarts.
+    If a re-discovery fails (e.g. the default route vanished mid-outage), the last
+    known address is kept - the router is still at that IP, which is exactly what
+    the local-vs-isp classification needs to probe."""
+    global _gateway, _gateway_checked
     if GATEWAY_IP:
         _gateway = GATEWAY_IP
-    elif sys.platform == "darwin":
-        _gateway = _gw_from_macos()
+        return _gateway
+    mono = time.monotonic()
+    if _gateway != "unset" and (mono - _gateway_checked) < GW_REDISCOVER_S:
+        return _gateway
+    _gateway_checked = mono
+    if sys.platform == "darwin":
+        found = _gw_from_macos()
     elif sys.platform.startswith("win"):
-        _gateway = _gw_from_windows()
+        found = _gw_from_windows()
     else:
-        _gateway = _gw_from_proc() or _gw_from_ip_route()   # Linux / other POSIX
+        found = _gw_from_proc() or _gw_from_ip_route()   # Linux / other POSIX
+    if found or _gateway == "unset":
+        _gateway = found
     return _gateway
 
 
@@ -394,7 +407,7 @@ def init_db(conn):
         CREATE TABLE IF NOT EXISTS events (
             id     INTEGER PRIMARY KEY AUTOINCREMENT,
             ts     INTEGER NOT NULL,
-            kind   TEXT NOT NULL,        -- start | stop | pause | resume | gap
+            kind   TEXT NOT NULL,        -- start | stop | pause | resume | gap | gateway
             detail TEXT
         )
     """)
@@ -702,6 +715,14 @@ def main():
             log_event(conn, now, "gap", str(now - prev_ts))
 
         # --- probes ---
+        # Refresh the gateway (cheap: cached, re-discovered every GW_REDISCOVER_S) so a
+        # router/DHCP change updates cause classification without a daemon restart.
+        new_gw = discover_gateway()
+        if new_gw != gw_ip:
+            gw_ip = new_gw
+            meta_set(conn, "gateway", gw_ip or "")
+            log_event(conn, now, "gateway", gw_ip or "")
+            print(f"[{datetime.now(timezone.utc).isoformat()}] gateway changed -> {gw_ip}", flush=True)
         up, latency, target = check_connectivity(targets, timeout_s)   # confirmed (retry burst on failure)
         gw = True if up else probe_gateway(gw_ip)     # internet up => LAN up
         net_cause = None if up else classify_net_cause(gw)
@@ -787,3 +808,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
