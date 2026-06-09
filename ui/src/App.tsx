@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
-  ChevronLeft, ChevronRight, Download, FileText, Pause, Play, Siren, Trash2, TrendingDown, TrendingUp,
+  ChevronLeft, ChevronRight, Download, FileText, Globe, Pause, Play, Siren, Trash2, TrendingDown, TrendingUp,
 } from "lucide-react"
 import { toast } from "sonner"
 import { Card } from "@/components/ui/card"
@@ -25,7 +25,7 @@ import { ReportView } from "@/components/ReportView"
 import { InfoTip } from "@/components/InfoTip"
 import type { Live, Meta, RangeData } from "@/lib/types"
 import {
-  PRESETS, defaultPreset, fmtDate, fmtDur, fmtRangeShort, fmtSince, fmtStreak, fmtTime, humanBytes, latencyFence, nowSec, pctText, resolverName,
+  PRESETS, defaultPreset, fmtDate, fmtDur, fmtRangeShort, fmtSince, fmtStreak, fmtTime, humanBytes, nowSec, pctText, resolverName,
 } from "@/lib/format"
 import watchmanLogo from "@/assets/watchman.png"
 
@@ -197,7 +197,10 @@ export default function App() {
   const s = data?.summary
   // Outage list + DNS panel now follow the selected range (no longer a fixed 24h window), so
   // the list agrees with the gauge / Downtime / Outages tiles above it.
-  const rangeNet = data ? data.outages.filter((o) => o.kind !== "dns") : []
+  // The outage list shows connectivity (net) outages AND DNS outages (a DNS failure means sites
+  // won't load on any device, so it belongs here), each clearly labeled. DNS stays out of the
+  // downtime math; that's handled server-side.
+  const rangeNet = data ? data.outages.filter((o) => o.kind === "net" || o.kind === "dns") : []
   // Paginate the outage list so the card can bottom-align with Data & tools instead of growing
   // unbounded. Page size is fixed; pagination controls sit pinned at the bottom of the card.
   const OUT_PAGE = 7
@@ -205,18 +208,13 @@ export default function App() {
   const outCurPage = Math.min(outPage, outTotalPages - 1)
   const shownOut = rangeNet.slice(outCurPage * OUT_PAGE, (outCurPage + 1) * OUT_PAGE)
   const wd = data ? data.end - data.start > 86400 : false
-  // Latency headline from healthy (fully-up) buckets, with the same robust outlier fence the
-  // chart uses, so latency spikes near the timeout don't inflate Avg/Max.
-  const upB = data ? data.buckets.filter((b) => b.total > 0 && b.up === b.total && b.avg != null) : []
-  const latFence = latencyFence(upB.map((b) => b.avg as number))
-  const latKept = upB.filter((b) => (b.avg as number) <= latFence)
-  const latW = latKept.reduce((a, b) => a + b.up, 0)
-  const latAvg = latW ? Math.round((latKept.reduce((a, b) => a + (b.avg as number) * b.up, 0) / latW) * 10) / 10 : null
-  const latAvgs = latKept.map((b) => b.avg as number)
-  const latMin = latAvgs.length ? Math.min(...latAvgs) : null
-  const latMax = latAvgs.length ? Math.max(...latAvgs) : null
+  // Latency headline: the TRUE numbers (typical avg + peak) straight from the summary, not a
+  // fenced/smoothed version, so a real spike actually shows instead of hiding.
+  const latAvg = s?.avg_lat ?? null
+  const latMax = s?.max_lat ?? null
   const down = s?.down_seconds ?? 0
   const outs = s?.outage_count ?? 0
+  const dnsEvents = s?.dns_events ?? 0
   // Label suffix = the selected period (e.g. "1H", "1Y", "All", or a compact custom range).
   const periodLabel = preset === "custom" && customRange
     ? fmtRangeShort(customRange.start, customRange.end)
@@ -229,10 +227,10 @@ export default function App() {
 
   // All-time stats (from the first-check fetch) + live, for the Data & tools panel
   const at = allOutages?.summary
-  const netDone = allOutages ? allOutages.outages.filter((o) => o.kind === "net" && !o.ongoing) : []
-  const mttr = netDone.length ? netDone.reduce((a, o) => a + o.duration_s, 0) / netDone.length : null
+  const doneOut = allOutages ? allOutages.outages.filter((o) => (o.kind === "net" || o.kind === "dns") && !o.ongoing) : []
+  const mttr = doneOut.length ? doneOut.reduce((a, o) => a + o.duration_s, 0) / doneOut.length : null
   const mtbf = at && at.outage_count > 0 ? at.monitored_seconds / at.outage_count : null
-  const lastOut = allOutages?.outages.find((o) => o.kind === "net")
+  const lastOut = allOutages?.outages.find((o) => o.kind === "net" || o.kind === "dns")
   const liveLat = live?.latency_ms != null ? `${live.latency_ms} ms` : live?.status === "down" ? "Offline" : "—"
   const dataSections: { title: string; rows: { label: string; hint: ReactNode; value?: ReactNode; control?: ReactNode }[] }[] = meta
     ? [
@@ -321,10 +319,13 @@ export default function App() {
               hint="How long the connection has been continuously online right now, with no outages. This is the live streak and ignores the selected time range." />
             <StatCard className="grow" icon={TrendingDown} label={`Downtime (${periodLabel})`} accent="var(--down)"
               value={fmtDur(down)} valueColor={down > 0 ? "var(--down)" : "var(--muted-foreground)"}
-              hint="Total time your connection was down in the selected period, not counting paused or no-data periods." />
+              hint="Total time the internet was unusable in the selected period: connectivity outages plus DNS failures. Excludes paused and no-data periods." />
             <StatCard className="grow" icon={Siren} label={`Outages (${periodLabel})`} accent="var(--orange)"
               value={s ? outs : "—"} valueColor={outs > 0 ? "var(--orange)" : "var(--muted-foreground)"}
-              hint="How many separate times your connection dropped in the selected period." />
+              hint="How many separate times the internet went unusable in the selected period, both connectivity drops and DNS outages. The list below labels each one's kind." />
+            <StatCard className="grow" icon={Globe} label={`DNS outages (${periodLabel})`} accent="var(--primary)"
+              value={s ? dnsEvents : "—"} valueColor={dnsEvents > 0 ? "var(--primary)" : "var(--muted-foreground)"}
+              hint="Times name resolution failed in the selected period. Counts as downtime (sites won't load on any device even though the line is up), but tracked as its own kind so you can tell a DNS outage from a connectivity drop." />
           </div>
 
           {/* Right column: uptime + latency in one container, shared range tabs and linked hover */}
@@ -388,7 +389,7 @@ export default function App() {
                 </h2>
                 {latAvg != null && (
                   <span className="font-mono text-xs text-muted-foreground">
-                    Avg {latAvg} ms{latMin != null ? ` · Min ${latMin} · Max ${latMax}` : ""}
+                    Avg {latAvg} ms{latMax != null ? ` · Peak ${latMax}` : ""}
                   </span>
                 )}
               </div>

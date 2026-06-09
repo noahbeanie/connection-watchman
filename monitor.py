@@ -86,7 +86,7 @@ CAUSE_PHRASE = {
 }
 
 # Internet targets. Up if ANY connects. Diverse providers AND ports on purpose:
-# 443 first (what real traffic like a video stream uses), then 53, so a router or
+# 443 first (the port normal web traffic uses), then 53, so a router or
 # ISP that briefly blocks/rate-limits one port to these IPs is not logged as an
 # outage while the rest of the internet is fine.
 TARGETS = [
@@ -146,9 +146,9 @@ def _connect_direct(host, port, timeout):
 
 
 def check_once(targets=TARGETS, timeout=TIMEOUT):
-    """Return (up: bool, latency_ms: float|None). Short-circuits: returns as soon
-    as ANY target answers WITHIN `timeout`, so a connection that can only respond
-    slower than the cutoff does not count as answering. Latency = the connect that answered."""
+    """Return (up: bool, latency_ms: float|None, target: str|None). Short-circuits: returns as
+    soon as ANY target answers WITHIN `timeout`. `target` is the answering "host:port" (None if
+    all failed), recorded so a future "why wasn't this caught" can be traced from the data."""
     for host, port in targets:
         start = time.monotonic()
         try:
@@ -157,28 +157,28 @@ def check_once(targets=TARGETS, timeout=TIMEOUT):
             else:
                 with socket.create_connection((host, port), timeout=timeout):
                     pass
-            return True, (time.monotonic() - start) * 1000.0
+            return True, (time.monotonic() - start) * 1000.0, f"{host}:{port}"
         except (OSError, UnicodeError):
             # UnicodeError (e.g. an over-long DNS label in a custom target) is NOT an OSError;
             # catch it too so a malformed target is just "unreachable", never a daemon crash.
             continue
-    return False, None
+    return False, None, None
 
 
 def check_connectivity(targets=TARGETS, timeout=TIMEOUT):
     """check_once() with a fast retry burst, so a single dropped packet (or one slow blip past
-    the cutoff) is not logged as an outage. Returns (up: bool, latency_ms: float|None)."""
-    up, latency = check_once(targets, timeout)
+    the cutoff) is not logged as an outage. Returns (up: bool, latency_ms: float|None, target)."""
+    up, latency, target = check_once(targets, timeout)
     if up:
-        return True, latency
+        return True, latency, target
     for _ in range(CONFIRM_RETRIES):
         if not _running:
             break
         time.sleep(RETRY_GAP)
-        up, latency = check_once(targets, timeout)
+        up, latency, target = check_once(targets, timeout)
         if up:
-            return True, latency
-    return False, None
+            return True, latency, target
+    return False, None, None
 
 
 def _resolve_system(host):
@@ -378,6 +378,7 @@ def init_db(conn):
     # additive migrations (safe to run on an existing live DB)
     _add_col(conn, "checks", "gw", "INTEGER")     # gateway reachable (1/0/NULL)
     _add_col(conn, "checks", "dns", "INTEGER")    # name resolution ok (1/0/NULL)
+    _add_col(conn, "checks", "target", "TEXT")    # which "host:port" answered the check (diagnostic)
     _add_col(conn, "outages", "cause", "TEXT")    # local | isp | dns | unknown
     _add_col(conn, "outages", "kind", "TEXT")     # net (connectivity) | dns
     _add_col(conn, "outages", "note", "TEXT")     # optional user-entered annotation
@@ -386,9 +387,9 @@ def init_db(conn):
     # downtime.
     conn.execute("UPDATE outages SET kind='dns' WHERE kind IS NULL AND cause='dns'")
     conn.execute("UPDATE outages SET kind='net' WHERE kind IS NULL")
-    # Brownouts ("slow but up") were removed from the app: drop any historical slow events so
+    # The "slow"/"unstable" quality signals were removed from the app: drop any historical rows so
     # they never resurface. They never counted toward downtime, so no uptime math changes.
-    conn.execute("DELETE FROM outages WHERE kind='slow'")
+    conn.execute("DELETE FROM outages WHERE kind IN ('slow', 'unstable')")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS events (
             id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -478,6 +479,7 @@ def alert_cfg(conn):
         "url": meta_get(conn, "cfg_alert_url", "") or "",
         "type": meta_get(conn, "cfg_alert_type", "discord") or "discord",
         "recovery": (meta_get(conn, "cfg_alert_recovery", "1") or "1") == "1",
+        "dns": (meta_get(conn, "cfg_alert_dns", "0") or "0") == "1",
     }
 
 
@@ -700,7 +702,7 @@ def main():
             log_event(conn, now, "gap", str(now - prev_ts))
 
         # --- probes ---
-        up, latency = check_connectivity(targets, timeout_s)   # confirmed (retry burst on failure)
+        up, latency, target = check_connectivity(targets, timeout_s)   # confirmed (retry burst on failure)
         gw = True if up else probe_gateway(gw_ip)     # internet up => LAN up
         net_cause = None if up else classify_net_cause(gw)
 
@@ -714,10 +716,12 @@ def main():
             record_transition(conn, now, "dns", went_up=True)
 
         conn.execute(
-            "INSERT OR REPLACE INTO checks (ts, up, latency_ms, gw, dns) VALUES (?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO checks (ts, up, latency_ms, gw, dns, target) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (now, 1 if up else 0, latency,
              (None if gw is None else (1 if gw else 0)),
-             (None if dns_ok is None else (1 if dns_ok else 0))),
+             (None if dns_ok is None else (1 if dns_ok else 0)),
+             target),
         )
 
         # --- connectivity (kind 'net') transitions ---
@@ -742,14 +746,23 @@ def main():
         elif not up:
             escalate_cause(conn, "net", net_cause)     # ongoing outage: widen cause if worse
 
-        # --- DNS (kind 'dns') transitions, only while the line is up ---
+        # --- DNS (kind 'dns') transitions, only while the line is up. A DNS failure means sites
+        # won't load on any device even though the line is up, so it is alertable (and deliverable,
+        # since the line is up). It is still kept out of the connectivity downtime math. ---
+        DNS_DOWN_MSG = ("Your connection is up but DNS lookups are failing, so sites won't load on "
+                        "any device until it recovers.")
         if up:
             if prev_dns is not None and dns_ok != prev_dns:
                 record_transition(conn, now, "dns", went_up=dns_ok, cause="dns")
                 print(f"[{datetime.now(timezone.utc).isoformat()}] "
                       f"DNS {'OK' if dns_ok else 'FAILING'}", flush=True)
+                if alerts["dns"] and alerts["url"]:
+                    pending_alerts.append(("DNS recovered", "Name resolution is working again.")
+                                          if dns_ok else ("DNS failing", DNS_DOWN_MSG))
             elif prev_dns is None and not dns_ok:
                 record_transition(conn, now, "dns", went_up=False, cause="dns")
+                if alerts["dns"] and alerts["url"]:
+                    pending_alerts.append(("DNS failing", DNS_DOWN_MSG))
 
         # --- hourly retention trim ---
         if now - last_trim >= 3600:

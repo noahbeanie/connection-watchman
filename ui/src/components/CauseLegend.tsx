@@ -1,8 +1,8 @@
 import { useState } from "react"
 import { createPortal } from "react-dom"
 
-// Connectivity (kind "net") causes only. DNS is now its own signal, shown in
-// the DnsSignal section, so it is not listed here.
+// Legend for the outage list: the connectivity (kind "net") causes plus DNS, which is shown here
+// (clearly labeled, in its own colour) but kept out of the connectivity downtime math.
 const CAUSES = [
   {
     key: "isp",
@@ -21,6 +21,12 @@ const CAUSES = [
     label: "Unknown",
     color: "var(--muted-foreground)",
     desc: "The connection was down but the cause could not be pinned down, for example when the router's address was not known at the moment of the check.",
+  },
+  {
+    key: "dns",
+    label: "DNS",
+    color: "var(--primary)",
+    desc: "Name resolution failed: websites and apps won't load on any device even though the line is technically up. Counts as downtime, but shown as its own kind (DNS) so you can tell it apart from a connectivity outage.",
   },
 ]
 

@@ -7,6 +7,7 @@ export interface Summary {
   monitored_seconds: number
   gap_seconds: number
   outage_count: number
+  net_events: number
   dns_events: number
   dns_seconds: number
   dns_h: string
@@ -37,7 +38,7 @@ export interface Live {
   streak_seconds?: number; streak_h?: string; interval: number
 }
 export interface Target { host: string; port: number }
-export interface AlertConfig { type: string; url: string; recovery: boolean }
+export interface AlertConfig { type: string; url: string; recovery: boolean; dns: boolean }
 export interface Meta {
   first_ts: number | null; db_size_bytes: number; paused: boolean; pause_until: number | null
   retention_days: number; outage_retention_days: number; timeout_ms: number

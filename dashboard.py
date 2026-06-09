@@ -268,7 +268,7 @@ def build_range(conn, start, end):
     total, up = s["total"], s["up"]
     sample_pct = (up / total * 100.0) if total else None
 
-    # per-bucket data (drives the optional latency overlay + scrub latency lookup)
+    # per-bucket data (drives the latency chart + scrub lookup)
     buckets = []
     for row in conn.execute(
         """SELECT (ts/?)*? AS b, COUNT(*) total, COALESCE(SUM(up),0) up,
@@ -312,7 +312,7 @@ def build_range(conn, start, end):
     net_count, dns_count = 0, 0
     for row in raw:
         kind = row["kind"] or "net"
-        if kind == "slow":             # brownouts were removed; ignore any legacy slow rows
+        if kind in ("slow", "unstable"):   # removed quality signals; ignore any legacy rows
             continue
         ongoing = row["end_ts"] is None
         o_end = now if ongoing else row["end_ts"]
@@ -333,11 +333,14 @@ def build_range(conn, start, end):
             if b > a:
                 net_iv.append((a, b))
 
-    # gap-corrected availability: gaps count as neither up nor down
+    # gap-corrected availability: gaps count as neither up nor down. Downtime = time the internet
+    # was unusable, which includes BOTH connectivity (net) outages AND confirmed DNS outages (DNS
+    # down on every resolver = no usable internet). The two never overlap (DNS is only probed while
+    # the line is up), so merging them is exact. dns_seconds is also kept on its own as a breakdown.
     gaps = get_gaps(conn, start, end, now)
     gap_merged = _merge([(g[0], g[1]) for g in gaps])
     gap_seconds = _total(gap_merged)
-    down_iv = _subtract(_merge(net_iv), gap_merged)      # connectivity time minus gaps
+    down_iv = _subtract(_merge(net_iv + dns_iv), gap_merged)   # net + DNS time minus gaps
     down_seconds = _total(down_iv)
     dns_seconds = _total(_subtract(_merge(dns_iv), gap_merged))
     monitored = max(0, window - gap_seconds)
@@ -350,12 +353,13 @@ def build_range(conn, start, end):
             "availability_pct": availability,
             "pct": sample_pct,                      # sample-based, for reference
             "checks": total,
-            "down_seconds": down_seconds,           # exact, gap-excluded (connectivity)
+            "down_seconds": down_seconds,           # exact, gap-excluded (connectivity + DNS)
             "down_h": fmt_dur(down_seconds),
             "monitored_seconds": monitored,
             "gap_seconds": gap_seconds,
-            "outage_count": net_count,              # connectivity outages only
-            "dns_events": dns_count,                # separate DNS signal (excluded from uptime)
+            "outage_count": net_count + dns_count,  # total outages (connectivity + DNS)
+            "net_events": net_count,                # connectivity-only breakdown
+            "dns_events": dns_count,                # DNS-only breakdown
             "dns_seconds": dns_seconds,
             "dns_h": fmt_dur(dns_seconds),
             "avg_lat": round(s["avg_lat"], 1) if s["avg_lat"] is not None else None,
@@ -435,6 +439,7 @@ def build_meta(conn):
             "type": m("cfg_alert_type", "discord"),
             "url": m("cfg_alert_url", "") or "",
             "recovery": (m("cfg_alert_recovery", "1") or "1") == "1",
+            "dns": (m("cfg_alert_dns", "0") or "0") == "1",
         },
         "now": int(time.time()),
     }
@@ -796,11 +801,12 @@ class Handler(BaseHTTPRequestHandler):
                         self._send(400, json.dumps({"error": "URL must start with http:// or https://"}), "application/json")
                         return
                 recovery = "1" if data.get("recovery", True) else "0"
+                dns_alert = "1" if data.get("dns", False) else "0"
                 conn = db_rw()
                 try:
                     conn.execute("BEGIN IMMEDIATE")
                     for k, v in (("cfg_alert_type", atype), ("cfg_alert_url", url),
-                                 ("cfg_alert_recovery", recovery)):
+                                 ("cfg_alert_recovery", recovery), ("cfg_alert_dns", dns_alert)):
                         conn.execute("INSERT INTO meta (k, v) VALUES (?, ?) "
                                      "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))
                     conn.execute("COMMIT")

@@ -61,8 +61,10 @@ must also answer within the **response cutoff** (dashboard setting, default 1s),
 reachable-but-crawling link counts as down. TCP-connect is used over ICMP because it needs no
 root and isn't rate-limited. Latency is the connect that answered.
 
-**DNS** is a separate signal that never affects uptime: resolve via the system resolver, then
-fall back to public resolvers before declaring DNS down. Only checked while connectivity is up.
+**DNS** is checked separately: resolve via the system resolver, then fall back to public resolvers
+before declaring DNS down (only while the line is up). A confirmed DNS failure means no usable
+internet on any device, so it counts as downtime, but it's recorded as its own kind so you can
+tell a DNS outage apart from a line drop.
 
 Each outage stores its exact start/end and a **cause**, found by probing the LAN gateway only
 when connectivity fails:
@@ -73,17 +75,17 @@ when connectivity fails:
 | `isp`     | The router is fine, the internet isn't: your ISP / WAN. |
 | `unknown` | Couldn't determine (e.g. gateway IP unknown). |
 
-**Availability** = `(monitored - outage) / monitored`. Monitoring gaps (reboots, pauses, sleep)
-count as neither up nor down, so they never inflate or deflate the number. Outage and DNS
-history is exact, not bucket-estimated.
+**Availability** = `(monitored - downtime) / monitored`, where downtime is connectivity outages
+plus confirmed DNS outages. Monitoring gaps (reboots, pauses, sleep) count as neither up nor down,
+so they never inflate or deflate the number. Outage history is exact, not bucket-estimated.
 
 ## Dashboard
 
 - Radial **uptime gauge** for the selected range, graded Excellent to Poor.
 - **Latency chart** with bands marking outages (red), no-data (grey), and paused (blue).
 - **Status-page tracker**: per-slice up / partial / down / no-data; hover for cause and latency.
-- **KPI tiles**: current uptime streak, downtime, outage count.
-- **Outage log** for the range (paginated), with per-outage notes and delete.
+- **KPI tiles**: current uptime streak, downtime, outage count, and DNS outages.
+- **Outage log** for the range (paginated), each entry labeled by kind (ISP, your network, DNS).
 - **Range presets** (1H through All) plus a custom date or single day.
 - **Printable report** to hand to your ISP.
 - **Data & tools**: DB size, check interval / retention / response cutoff, notifications, custom

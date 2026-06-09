@@ -25,13 +25,15 @@ export function AlertSettings({ alerts, onSaved }: { alerts: AlertConfig; onSave
   const [url, setUrl] = useState(alerts.url || "")
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
+  const [dns, setDns] = useState(!!alerts.dns)
 
   useEffect(() => {
     setType(alerts.type === "webhook" ? "webhook" : "discord")
     setUrl(alerts.url || "")
-  }, [alerts.type, alerts.url])
+    setDns(!!alerts.dns)
+  }, [alerts.type, alerts.url, alerts.dns])
 
-  const persist = () => post("/api/alerts", { type, url: url.trim(), recovery: true })
+  const persist = () => post("/api/alerts", { type, url: url.trim(), recovery: true, dns })
 
   const save = async () => {
     setSaving(true)
@@ -80,6 +82,11 @@ export function AlertSettings({ alerts, onSaved }: { alerts: AlertConfig; onSave
           <Send className="size-3.5" />{testing ? "Sending" : "Test"}
         </Button>
       </div>
+      <label className="flex cursor-pointer select-none items-start gap-2 text-[0.72rem] leading-snug text-muted-foreground">
+        <input type="checkbox" checked={dns} onChange={(e) => setDns(e.target.checked)}
+          className="mt-0.5 size-3.5 shrink-0 accent-[var(--primary)]" />
+        Also alert me when DNS fails (sites stop loading on every device even though the line is up).
+      </label>
       {/* Both hints share one grid cell, so the tile keeps the height of the taller hint and
           doesn't jump when you toggle between Discord and Webhook. */}
       <div className="grid text-[0.7rem] leading-relaxed text-muted-foreground/70">
