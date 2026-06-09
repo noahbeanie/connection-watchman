@@ -12,8 +12,8 @@ log written by monitor.py and serves:
   - "/api/export/outages.csv" streamed outage log
   - POST "/api/pause"         {paused: bool, minutes?: int} -> toggles the PAUSED sentinel
   - POST "/api/reset"         {confirm:"RESET"} -> wipes the database (guarded)
-  - POST "/api/config"        {interval?, retention_days?, degraded_ms?, ...} -> live settings
-  - POST "/api/alerts"        {type, url, recovery, degraded} -> notification settings
+  - POST "/api/config"        {interval?, retention_days?, timeout_ms?, ...} -> live settings
+  - POST "/api/alerts"        {type, url, recovery} -> notification settings
   - POST "/api/alert/test"    sends a test notification to the configured channel
   - POST "/api/targets"       {targets:[{host,port}]} -> custom probe targets ([] = defaults)
   - POST "/api/outage/note"   {id, note} ; POST "/api/outage/delete" {id}
@@ -37,8 +37,6 @@ PORT = int(os.environ.get("UPTIME_PORT", "8080"))
 INTERVAL = float(os.environ.get("UPTIME_INTERVAL", "15"))
 RETENTION_DAYS = int(os.environ.get("UPTIME_RETENTION_DAYS", "365"))
 OUTAGE_RETENTION_DAYS = int(os.environ.get("UPTIME_OUTAGE_RETENTION_DAYS", "0"))  # 0 = forever
-DEGRADED_MS = int(os.environ.get("UPTIME_DEGRADED_MS", "250"))   # latency over this = "slow"; 0 = off
-BROWNOUT_MS = int(os.environ.get("UPTIME_BROWNOUT_MS", "750"))    # sustained latency over this = a brownout event
 PAUSE_FILE = os.path.join(BASE, "PAUSED")
 
 # User-adjustable settings persisted in the meta table (set via /api/config; the monitor
@@ -47,13 +45,10 @@ CFG_OPTIONS = {
     "interval": (5, 10, 15, 30, 60),
     "retention_days": (0, 30, 90, 180, 365),       # 0 = forever
     "outage_retention_days": (0, 90, 180, 365),    # 0 = forever
-    "degraded_ms": (0, 150, 250, 400, 600),        # 0 = off
-    "brownout_ms": (0, 500, 750, 1000, 1500),      # 0 = off
     "timeout_ms": (1000, 1500, 2000, 3000),        # response cutoff: answer within this or it's down
 }
 CFG_DEFAULT = {"interval": INTERVAL, "retention_days": RETENTION_DAYS,
-               "outage_retention_days": OUTAGE_RETENTION_DAYS, "degraded_ms": DEGRADED_MS,
-               "brownout_ms": BROWNOUT_MS, "timeout_ms": 1000}
+               "outage_retention_days": OUTAGE_RETENTION_DAYS, "timeout_ms": 1000}
 
 ALERT_TYPES = ("discord", "webhook")
 # Host label for a custom target: a DNS hostname or IPv4 (no schemes, paths, or spaces).
@@ -206,7 +201,7 @@ def get_live(conn, now):
     # A FAILING check cycle can legitimately take the full probe budget (all targets time out and
     # retry, ~40-50s) while the connection is merely struggling, not gone. Treat the latest reading
     # as stale ("No signal") only once it is older than the monitor's own no-data gap threshold, so
-    # a slow cycle shows the real up/down/slow state instead of falsely flipping to "No signal".
+    # a slow cycle shows the real up/down state instead of falsely flipping to "No signal".
     stale_after = max(30, interval * 6)
     try:
         import monitor as _mon
@@ -273,16 +268,6 @@ def build_range(conn, start, end):
     total, up = s["total"], s["up"]
     sample_pct = (up / total * 100.0) if total else None
 
-    # "Slow but up": checks that connected yet exceeded the degraded-latency threshold.
-    degraded_ms = cfg_get(conn, "degraded_ms")
-    deg_checks = 0
-    if degraded_ms > 0:
-        deg_checks = conn.execute(
-            "SELECT COUNT(*) c FROM checks WHERE ts>=? AND ts<? AND up=1 "
-            "AND latency_ms IS NOT NULL AND latency_ms>?",
-            (start, end, degraded_ms),
-        ).fetchone()["c"]
-
     # per-bucket data (drives the optional latency overlay + scrub latency lookup)
     buckets = []
     for row in conn.execute(
@@ -323,10 +308,12 @@ def build_range(conn, start, end):
     ).fetchall()
 
     outages = []
-    net_iv, dns_iv, brown_iv = [], [], []
-    net_count, dns_count, brown_count = 0, 0, 0
+    net_iv, dns_iv = [], []
+    net_count, dns_count = 0, 0
     for row in raw:
         kind = row["kind"] or "net"
+        if kind == "slow":             # brownouts were removed; ignore any legacy slow rows
+            continue
         ongoing = row["end_ts"] is None
         o_end = now if ongoing else row["end_ts"]
         outages.append({
@@ -341,10 +328,6 @@ def build_range(conn, start, end):
             dns_count += 1
             if b > a:
                 dns_iv.append((a, b))
-        elif kind == "slow":           # brownout: up but severely slow; never counts as downtime
-            brown_count += 1
-            if b > a:
-                brown_iv.append((a, b))
         else:
             net_count += 1
             if b > a:
@@ -357,15 +340,8 @@ def build_range(conn, start, end):
     down_iv = _subtract(_merge(net_iv), gap_merged)      # connectivity time minus gaps
     down_seconds = _total(down_iv)
     dns_seconds = _total(_subtract(_merge(dns_iv), gap_merged))
-    brownout_seconds = _total(_subtract(_merge(brown_iv), gap_merged))
     monitored = max(0, window - gap_seconds)
     availability = ((monitored - down_seconds) / monitored * 100.0) if monitored > 0 else None
-
-    # Degraded time = the fraction of online checks that were slow, applied to online time
-    # (uptime = monitored minus the outage time). A quality signal; never counts as downtime.
-    uptime_seconds = max(0, monitored - down_seconds)
-    degraded_seconds = round(uptime_seconds * deg_checks / up) if (degraded_ms > 0 and up > 0) else 0
-    degraded_pct = round(deg_checks / up * 100.0, 1) if (degraded_ms > 0 and up > 0) else None
 
     return {
         "start": start, "end": end, "now": now, "bucket": bucket,
@@ -382,13 +358,6 @@ def build_range(conn, start, end):
             "dns_events": dns_count,                # separate DNS signal (excluded from uptime)
             "dns_seconds": dns_seconds,
             "dns_h": fmt_dur(dns_seconds),
-            "brownout_count": brown_count,          # sustained slow-but-up events (not downtime)
-            "brownout_seconds": brownout_seconds,
-            "brownout_h": fmt_dur(brownout_seconds),
-            "degraded_seconds": degraded_seconds,   # "slow but up" quality signal (not downtime)
-            "degraded_h": fmt_dur(degraded_seconds),
-            "degraded_pct": degraded_pct,
-            "degraded_ms": degraded_ms,             # the active slow threshold (0 = off)
             "avg_lat": round(s["avg_lat"], 1) if s["avg_lat"] is not None else None,
             "min_lat": round(s["min_lat"], 1) if s["min_lat"] is not None else None,
             "max_lat": round(s["max_lat"], 1) if s["max_lat"] is not None else None,
@@ -454,8 +423,6 @@ def build_meta(conn):
         "pause_until": pause_until,
         "retention_days": cfg_get(conn, "retention_days"),
         "outage_retention_days": cfg_get(conn, "outage_retention_days"),
-        "degraded_ms": cfg_get(conn, "degraded_ms"),
-        "brownout_ms": cfg_get(conn, "brownout_ms"),
         "timeout_ms": cfg_get(conn, "timeout_ms"),
         "schema_version": m("schema_version", "1"),
         "gateway": (m("gateway") or None),
@@ -468,7 +435,6 @@ def build_meta(conn):
             "type": m("cfg_alert_type", "discord"),
             "url": m("cfg_alert_url", "") or "",
             "recovery": (m("cfg_alert_recovery", "1") or "1") == "1",
-            "degraded": (m("cfg_alert_degraded", "0") or "0") == "1",
         },
         "now": int(time.time()),
     }
@@ -805,8 +771,8 @@ class Handler(BaseHTTPRequestHandler):
                     # Only a connectivity outage means "the internet was actually fine" (e.g. a modem
                     # reset): mark that window back online AND clear its latency samples (a partial
                     # outage's survivors sit near the timeout; cleared, the chart fills an estimated
-                    # line instead of lingering as a hidden-spike gap). A brownout/DNS event was up
-                    # the whole time, so deleting it just drops the event row, never rewriting data.
+                    # line instead of lingering as a hidden-spike gap). A DNS event was up the whole
+                    # time, so deleting it just drops the event row, never rewriting data.
                     if (row["kind"] or "net") == "net":
                         conn.execute("UPDATE checks SET up=1, latency_ms=NULL WHERE ts>=? AND ts<?",
                                      (row["start_ts"], row["end_ts"]))
@@ -830,12 +796,11 @@ class Handler(BaseHTTPRequestHandler):
                         self._send(400, json.dumps({"error": "URL must start with http:// or https://"}), "application/json")
                         return
                 recovery = "1" if data.get("recovery", True) else "0"
-                degraded = "1" if data.get("degraded", False) else "0"
                 conn = db_rw()
                 try:
                     conn.execute("BEGIN IMMEDIATE")
                     for k, v in (("cfg_alert_type", atype), ("cfg_alert_url", url),
-                                 ("cfg_alert_recovery", recovery), ("cfg_alert_degraded", degraded)):
+                                 ("cfg_alert_recovery", recovery)):
                         conn.execute("INSERT INTO meta (k, v) VALUES (?, ?) "
                                      "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))
                     conn.execute("COMMIT")

@@ -10,7 +10,7 @@ export const PRESETS = [
 ]
 
 export const CAUSE_LABEL: Record<string, string> = {
-  isp: "ISP / Internet", local: "Your network", dns: "DNS", unknown: "Unknown", slow: "Brownout",
+  isp: "ISP / Internet", local: "Your network", dns: "DNS", unknown: "Unknown",
 }
 
 // Very short, plain-English reason a connectivity stretch went down, shown when you
@@ -20,7 +20,6 @@ export const CAUSE_EXPLAIN: Record<string, string> = {
   local: "Your router or home network went down.",
   unknown: "The connection dropped, cause unknown.",
   dns: "DNS name lookups were failing.",
-  slow: "The connection stayed up but was very slow (a brownout).",
 }
 
 // Friendly names for well-known public DNS resolvers, shown in the DNS servers card.
@@ -153,9 +152,9 @@ export function defaultPreset(firstTs: number | null): string {
 }
 
 // Robust upper bound for "normal" latency, used to hide spikes that would blow out the
-// latency chart's Y axis. Some buckets stay fully "up" yet average near the connect timeout
-// (a degraded-but-connected stretch); those are dropped past this fence so the line gaps and
-// the axis scales to typical latency. Tukey's upper fence (Q3 + 1.5*IQR), floored at 2x the
+// latency chart's Y axis. Some buckets stay fully "up" yet average near the connect timeout;
+// those are clamped past this fence so the axis scales to typical latency instead of the
+// spike. Tukey's upper fence (Q3 + 1.5*IQR), floored at 2x the
 // median so mild jitter is never hidden. Returns Infinity when there are too few samples to
 // judge, leaving short / sparse ranges untouched.
 export function latencyFence(values: number[]): number {

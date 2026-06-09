@@ -10,13 +10,6 @@ export interface Summary {
   dns_events: number
   dns_seconds: number
   dns_h: string
-  brownout_count: number
-  brownout_seconds: number
-  brownout_h: string
-  degraded_seconds: number
-  degraded_h: string
-  degraded_pct: number | null
-  degraded_ms: number
   avg_lat: number | null
   min_lat: number | null
   max_lat: number | null
@@ -44,10 +37,10 @@ export interface Live {
   streak_seconds?: number; streak_h?: string; interval: number
 }
 export interface Target { host: string; port: number }
-export interface AlertConfig { type: string; url: string; recovery: boolean; degraded: boolean }
+export interface AlertConfig { type: string; url: string; recovery: boolean }
 export interface Meta {
   first_ts: number | null; db_size_bytes: number; paused: boolean; pause_until: number | null
-  retention_days: number; outage_retention_days: number; degraded_ms: number; brownout_ms: number; timeout_ms: number
+  retention_days: number; outage_retention_days: number; timeout_ms: number
   schema_version: string; gateway: string | null
   interval: number; now: number
   targets: Target[]; targets_custom: boolean; resolvers: string[]; dns_host: string | null

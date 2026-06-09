@@ -31,7 +31,7 @@ export function AlertSettings({ alerts, onSaved }: { alerts: AlertConfig; onSave
     setUrl(alerts.url || "")
   }, [alerts.type, alerts.url])
 
-  const persist = () => post("/api/alerts", { type, url: url.trim(), recovery: true, degraded: false })
+  const persist = () => post("/api/alerts", { type, url: url.trim(), recovery: true })
 
   const save = async () => {
     setSaving(true)

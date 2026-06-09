@@ -59,14 +59,6 @@ OUTAGE_RETENTION_DAYS = int(os.environ.get("UPTIME_OUTAGE_RETENTION_DAYS", "0"))
 CFG_INTERVAL_OPTIONS = (5, 10, 15, 30, 60)
 CFG_RETENTION_OPTIONS = (0, 30, 90, 180, 365)
 CFG_OUTAGE_RETENTION_OPTIONS = (0, 90, 180, 365)
-CFG_DEGRADED_OPTIONS = (0, 150, 250, 400, 600)   # latency (ms) over which a check is "slow"; 0 = off
-DEGRADED_MS = int(os.environ.get("UPTIME_DEGRADED_MS", "250"))  # per-check "slow" threshold (dashboard Slow tile)
-# Brownout = the line is UP but sustained-slow above this threshold; recorded as its own event
-# (kind 'slow') and drives the slow alert. A leaky score with hysteresis so a flapping-slow
-# connection still registers and a brief blip never does.
-CFG_BROWNOUT_OPTIONS = (0, 500, 750, 1000, 1500)
-BROWNOUT_MS = int(os.environ.get("UPTIME_BROWNOUT_MS", "750"))
-BROWNOUT_CAP, BROWNOUT_ON, BROWNOUT_OFF = 6, 4, 1
 # Response cutoff: a target must answer a TCP connect within this many ms or it doesn't count as
 # answering, so a connection that's technically reachable but crawling counts as DOWN (a real
 # outage) rather than "up". The retry burst still debounces, so only SUSTAINED slowness registers.
@@ -394,6 +386,9 @@ def init_db(conn):
     # downtime.
     conn.execute("UPDATE outages SET kind='dns' WHERE kind IS NULL AND cause='dns'")
     conn.execute("UPDATE outages SET kind='net' WHERE kind IS NULL")
+    # Brownouts ("slow but up") were removed from the app: drop any historical slow events so
+    # they never resurface. They never counted toward downtime, so no uptime math changes.
+    conn.execute("DELETE FROM outages WHERE kind='slow'")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS events (
             id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -454,14 +449,6 @@ def cfg_outage_retention(conn):
     return _cfg(conn, "outage_retention_days", OUTAGE_RETENTION_DAYS, CFG_OUTAGE_RETENTION_OPTIONS)
 
 
-def cfg_degraded_ms(conn):
-    return _cfg(conn, "degraded_ms", DEGRADED_MS, CFG_DEGRADED_OPTIONS)
-
-
-def cfg_brownout_ms(conn):
-    return _cfg(conn, "brownout_ms", BROWNOUT_MS, CFG_BROWNOUT_OPTIONS)
-
-
 def cfg_timeout_ms(conn):
     return _cfg(conn, "timeout_ms", TIMEOUT_MS_DEFAULT, CFG_TIMEOUT_OPTIONS)
 
@@ -491,7 +478,6 @@ def alert_cfg(conn):
         "url": meta_get(conn, "cfg_alert_url", "") or "",
         "type": meta_get(conn, "cfg_alert_type", "discord") or "discord",
         "recovery": (meta_get(conn, "cfg_alert_recovery", "1") or "1") == "1",
-        "degraded": (meta_get(conn, "cfg_alert_degraded", "0") or "0") == "1",
     }
 
 
@@ -681,10 +667,6 @@ def main():
 
     was_paused = False
     last_trim = float(meta_get(conn, "last_trim_ts", "0") or 0)
-    # Brownout ("slow but up") detection. Resume an event left open by a prior run so it gets
-    # closed cleanly; a leaky score (below) provides hysteresis against flapping latency.
-    brownout_state = open_outage(conn, "slow") is not None
-    brownout_score = BROWNOUT_CAP if brownout_state else 0
 
     while _running:
         cycle_start = time.monotonic()
@@ -765,39 +747,9 @@ def main():
             if prev_dns is not None and dns_ok != prev_dns:
                 record_transition(conn, now, "dns", went_up=dns_ok, cause="dns")
                 print(f"[{datetime.now(timezone.utc).isoformat()}] "
-                      f"DNS {'OK' if dns_ok else 'DEGRADED'}", flush=True)
+                      f"DNS {'OK' if dns_ok else 'FAILING'}", flush=True)
             elif prev_dns is None and not dns_ok:
                 record_transition(conn, now, "dns", went_up=False, cause="dns")
-
-        # --- brownout ("slow but up") detection: a sustained severe slowdown becomes its own
-        # event (kind 'slow'), never counted as downtime, and optionally alerts. The event is
-        # always recorded (alerts only gate the notification). A leaky score gives hysteresis so
-        # a flapping-slow line still registers and a single spike never does.
-        brownout_ms = cfg_brownout_ms(conn)
-        if up and brownout_ms > 0 and latency is not None:
-            brownout_score = (min(BROWNOUT_CAP, brownout_score + 1) if latency > brownout_ms
-                              else max(0, brownout_score - 1))
-            if not brownout_state and brownout_score >= BROWNOUT_ON:
-                brownout_state = True
-                record_transition(conn, now, "slow", went_up=False, cause="slow")
-                print(f"[{datetime.now(timezone.utc).isoformat()}] BROWNOUT start (~{round(latency)} ms)", flush=True)
-                if alerts["degraded"] and alerts["url"]:
-                    pending_alerts.append(("Connection slow",
-                        f"A brownout started: latency is over {brownout_ms} ms (about {round(latency)} ms). "
-                        f"The connection is up but very slow."))
-            elif brownout_state and brownout_score <= BROWNOUT_OFF:
-                brownout_state = False
-                record_transition(conn, now, "slow", went_up=True, cause="slow")
-                print(f"[{datetime.now(timezone.utc).isoformat()}] BROWNOUT end (~{round(latency)} ms)", flush=True)
-                if alerts["degraded"] and alerts["url"]:
-                    pending_alerts.append(("Connection back to normal",
-                        f"The brownout cleared. Latency is back to about {round(latency)} ms."))
-        elif not up:
-            # the line is fully down now; the net outage covers it, so close any open brownout
-            brownout_score = 0
-            if brownout_state:
-                brownout_state = False
-                record_transition(conn, now, "slow", went_up=True, cause="slow")
 
         # --- hourly retention trim ---
         if now - last_trim >= 3600:

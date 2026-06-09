@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
-  ChevronLeft, ChevronRight, Download, FileText, Gauge, Pause, Play, Siren, Trash2, TrendingDown, TrendingUp,
+  ChevronLeft, ChevronRight, Download, FileText, Pause, Play, Siren, Trash2, TrendingDown, TrendingUp,
 } from "lucide-react"
 import { toast } from "sonner"
 import { Card } from "@/components/ui/card"
@@ -41,14 +41,6 @@ const RETENTION_OPTS = [
 ]
 const OUTAGE_OPTS = [
   { v: 0, label: "Forever" }, { v: 365, label: "1 year" }, { v: 180, label: "6 months" }, { v: 90, label: "90 days" },
-]
-const DEGRADED_OPTS = [
-  { v: 0, label: "Off" }, { v: 150, label: "150 ms" }, { v: 250, label: "250 ms" },
-  { v: 400, label: "400 ms" }, { v: 600, label: "600 ms" },
-]
-const BROWNOUT_OPTS = [
-  { v: 0, label: "Off" }, { v: 500, label: "500 ms" }, { v: 750, label: "750 ms" },
-  { v: 1000, label: "1000 ms" }, { v: 1500, label: "1500 ms" },
 ]
 const TIMEOUT_OPTS = [
   { v: 1000, label: "1.0 s (strict)" }, { v: 1500, label: "1.5 s" },
@@ -194,7 +186,7 @@ export default function App() {
   const shownOut = rangeNet.slice(outCurPage * OUT_PAGE, (outCurPage + 1) * OUT_PAGE)
   const wd = data ? data.end - data.start > 86400 : false
   // Latency headline from healthy (fully-up) buckets, with the same robust outlier fence the
-  // chart uses, so degraded-but-connected spikes near the timeout don't inflate Avg/Max.
+  // chart uses, so latency spikes near the timeout don't inflate Avg/Max.
   const upB = data ? data.buckets.filter((b) => b.total > 0 && b.up === b.total && b.avg != null) : []
   const latFence = latencyFence(upB.map((b) => b.avg as number))
   const latKept = upB.filter((b) => (b.avg as number) <= latFence)
@@ -205,7 +197,6 @@ export default function App() {
   const latMax = latAvgs.length ? Math.max(...latAvgs) : null
   const down = s?.down_seconds ?? 0
   const outs = s?.outage_count ?? 0
-  const degraded = s?.degraded_seconds ?? 0
   // Label suffix = the selected period (e.g. "1H", "1Y", "All", or a compact custom range).
   const periodLabel = preset === "custom" && customRange
     ? fmtRangeShort(customRange.start, customRange.end)
@@ -215,8 +206,6 @@ export default function App() {
   const upStreak = live?.status === "up" ? fmtStreak(live.streak_seconds ?? 0)
     : live?.status === "down" ? "Offline" : meta?.paused ? "Paused" : "—"
   const upStreakColor = live?.status === "up" ? "var(--up)" : live?.status === "down" ? "var(--down)" : "var(--muted-foreground)"
-  const slowVal = s ? (s.degraded_ms > 0 ? (degraded > 0 ? fmtDur(degraded) : "None") : "Off") : "—"
-  const slowColor = degraded > 0 ? "var(--amber)" : "var(--muted-foreground)"
 
   // All-time stats (from the first-check fetch) + live, for the Data & tools panel
   const at = allOutages?.summary
@@ -243,8 +232,6 @@ export default function App() {
           rows: [
             { label: "Check interval", control: <ConfigSelect value={meta.interval} options={INTERVAL_OPTS} onChange={(v) => updateConfig("interval", v)} />, hint: "How often a connectivity check runs. Takes effect within a cycle; the rest of the app follows the new cadence." },
             { label: "Response cutoff", control: <ConfigSelect value={meta.timeout_ms} options={TIMEOUT_OPTS} onChange={(v) => updateConfig("timeout_ms", v)} />, hint: "A server must answer within this or the check counts as down (a real outage), so a connection that's technically reachable but too slow to use still registers. Lower is stricter; the retry debounce means only sustained slowness counts, not one-off blips." },
-            { label: "Slow threshold", control: <ConfigSelect value={meta.degraded_ms} options={DEGRADED_OPTS} onChange={(v) => updateConfig("degraded_ms", v)} />, hint: "Latency above this counts as 'slow but up': shown as the Slow tile and a shaded zone on the latency chart. Off disables it." },
-            { label: "Brownout threshold", control: <ConfigSelect value={meta.brownout_ms} options={BROWNOUT_OPTS} onChange={(v) => updateConfig("brownout_ms", v)} />, hint: "Sustained latency above this is recorded as a brownout event (the connection is up but very slow). Shown amber in the outages list and on the latency chart, and alertable. Off disables it." },
             { label: "Gateway", value: meta.gateway ?? "Unknown", hint: "Your router's local IP. Used to tell a local problem apart from an ISP problem." },
             { label: "Retention", control: <ConfigSelect value={meta.retention_days} options={RETENTION_OPTS} onChange={(v) => updateConfig("retention_days", v)} />, hint: "How long raw per-check data is kept before it's trimmed." },
             {
@@ -315,9 +302,6 @@ export default function App() {
             <StatCard className="grow" icon={TrendingDown} label={`Downtime (${periodLabel})`} accent="var(--down)"
               value={fmtDur(down)} valueColor={down > 0 ? "var(--down)" : "var(--muted-foreground)"}
               hint="Total time your connection was down in the selected period, not counting paused or no-data periods." />
-            <StatCard className="grow" icon={Gauge} label={`Slow (${periodLabel})`} accent="var(--amber)"
-              value={slowVal} valueColor={slowColor}
-              hint="Time the connection was up but slow (latency over your slow threshold). A quality signal: it never counts as downtime. Set the threshold under Data & tools." />
             <StatCard className="grow" icon={Siren} label={`Outages (${periodLabel})`} accent="var(--orange)"
               value={s ? outs : "—"} valueColor={outs > 0 ? "var(--orange)" : "var(--muted-foreground)"}
               hint="How many separate times your connection dropped in the selected period." />
@@ -389,7 +373,7 @@ export default function App() {
                 )}
               </div>
               <div className="flex flex-col h-[160px]">
-                {data ? <LatencyChart data={data} hoverT={hoverT} onHoverT={setHoverT} degradedMs={meta?.degraded_ms ?? 0} /> : <Skeleton h={160} />}
+                {data ? <LatencyChart data={data} hoverT={hoverT} onHoverT={setHoverT} /> : <Skeleton h={160} />}
               </div>
             </Card>
           </div>

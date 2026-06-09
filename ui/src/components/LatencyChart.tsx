@@ -28,11 +28,10 @@ function outageSpans(buckets: RangeData["buckets"], bucket: number): { x1: numbe
   return spans
 }
 
-export function LatencyChart({ data, hoverT, onHoverT, degradedMs = 0 }: {
+export function LatencyChart({ data, hoverT, onHoverT }: {
   data: RangeData
   hoverT?: number | null
   onHoverT?: (t: number | null) => void
-  degradedMs?: number
 }) {
   const wrapRef = useRef<HTMLDivElement>(null)
   // Dismiss the hover tooltip on scroll: touch has no mouseleave, so a fixed-position tip
@@ -107,16 +106,12 @@ export function LatencyChart({ data, hoverT, onHoverT, degradedMs = 0 }: {
       series.push({ t: p.t + data.bucket, avg: null, plot: null, up: 0, total: 0, est: false })
     }
   }
-  // "Slow" zone shading + threshold line at the degraded threshold; drawn only when in view.
-  const showSlow = degradedMs > 0 && degradedMs < maxL
-
-  // Bands so every line gap is explained: red = connectivity outage (up < total), amber =
-  // brownout (kind 'slow'), grey = no-data (reboot/pause). Clamped to the plotted time domain.
+  // Bands so every line gap is explained: red = connectivity outage (up < total),
+  // grey = no-data (reboot/stall), blue = paused. Clamped to the plotted time domain.
   const tMin = points[0].t
   const tMax = points[points.length - 1].t
   const clampSpan = (x1: number, x2: number) => ({ x1: Math.max(x1, tMin), x2: Math.min(x2, tMax) })
   const bands = outageSpans(data.buckets, data.bucket).map((b) => clampSpan(b.x1, b.x2)).filter((b) => b.x2 > b.x1)
-  const brownBands = data.outages.filter((o) => o.kind === "slow").map((o) => clampSpan(o.start, o.end ?? data.now)).filter((b) => b.x2 > b.x1)
   // Paused spans get their own blue band (matching the tracker); genuine no-data gaps stay grey.
   const pausedBands = data.gaps.filter((g) => g.kind === "paused").map((g) => clampSpan(g.start, g.end)).filter((b) => b.x2 > b.x1)
   const nodataBands = data.gaps.filter((g) => g.kind !== "paused").map((g) => clampSpan(g.start, g.end)).filter((b) => b.x2 > b.x1)
@@ -208,11 +203,6 @@ export function LatencyChart({ data, hoverT, onHoverT, degradedMs = 0 }: {
           />
           {/* Keep a tooltip so Recharts computes the active point for onMouseMove, but render nothing. */}
           <ChartTooltip cursor={false} content={() => null} />
-          {/* Faint "slow" zone: latency worse than the degraded threshold (the lower band). */}
-          {showSlow && (
-            <ReferenceArea y1={degradedMs} y2={maxL} fill="var(--down)" fillOpacity={0.06}
-              stroke="none" ifOverflow="visible" />
-          )}
           {/* Grey bands over genuine no-data spans (reboot / stall): a gap that is not an outage. */}
           {nodataBands.map((b, i) => (
             <ReferenceArea key={`gap-${i}`} x1={b.x1} x2={b.x2}
@@ -223,11 +213,6 @@ export function LatencyChart({ data, hoverT, onHoverT, degradedMs = 0 }: {
             <ReferenceArea key={`paused-${i}`} x1={b.x1} x2={b.x2}
               fill="var(--paused)" fillOpacity={0.22} stroke="none" ifOverflow="visible"
               label={{ value: "Paused", position: "center", fill: "var(--paused)", fontSize: 10 }} />
-          ))}
-          {/* Amber bands over brownout (sustained slow-but-up) events. */}
-          {brownBands.map((b, i) => (
-            <ReferenceArea key={`brown-${i}`} x1={b.x1} x2={b.x2}
-              fill="var(--amber)" fillOpacity={0.14} stroke="none" ifOverflow="visible" />
           ))}
           {/* Half-transparent red bands over connectivity outages (where the latency line gaps). */}
           {bands.map((b, i) => (
@@ -244,10 +229,6 @@ export function LatencyChart({ data, hoverT, onHoverT, degradedMs = 0 }: {
             dataKey="plot" type="monotone" stroke="url(#latStroke)" strokeWidth={2.5}
             fill="url(#latFill)" baseValue={maxL} connectNulls={false} isAnimationActive={false}
           />
-          {showSlow && (
-            <ReferenceLine y={degradedMs} stroke="var(--amber)" strokeDasharray="4 4" strokeOpacity={0.6}
-              label={{ value: `slow > ${degradedMs} ms`, position: "insideRight", fill: "var(--amber)", fontSize: 9 }} />
-          )}
           {hoverT != null && (
             <ReferenceLine x={hoverT} stroke="var(--foreground)" strokeOpacity={0.55} strokeWidth={1} />
           )}
