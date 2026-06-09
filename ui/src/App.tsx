@@ -140,6 +140,26 @@ export default function App() {
     load(); const id = setInterval(load, 30000); return () => clearInterval(id)
   }, [])
 
+  // Mobile browsers suspend JS timers while the tab is backgrounded or the screen is locked, so the
+  // polling intervals stop firing and the view goes stale until a manual refresh. Re-sync everything
+  // the instant the page becomes visible again (or regains focus / the network returns), so coming
+  // back to the tab snaps to current data instead of waiting on a suspended timer.
+  useEffect(() => {
+    const resync = () => {
+      if (document.visibilityState === "hidden") return
+      setNowTs(new Date())
+      refetchLive(); refetchMeta(); loadRange(); loadOutages()
+    }
+    document.addEventListener("visibilitychange", resync)
+    window.addEventListener("focus", resync)
+    window.addEventListener("online", resync)
+    return () => {
+      document.removeEventListener("visibilitychange", resync)
+      window.removeEventListener("focus", resync)
+      window.removeEventListener("online", resync)
+    }
+  }, [refetchLive, refetchMeta, loadRange, loadOutages])
+
   const setPause = async (want: boolean, minutes?: number) => {
     await post("/api/pause", { paused: want, minutes })
     await Promise.allSettled([refetchMeta(), refetchLive()])
