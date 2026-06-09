@@ -503,19 +503,20 @@ def send_alert(url, atype, title, message):
     if not url:
         return False
     import urllib.request
+    # A real User-Agent is required: Discord sits behind Cloudflare, which 403s the default
+    # "Python-urllib/x" agent (error 1010). Send our own on every channel.
+    ua = "ConnectionWatchman/1.0"
     try:
         if atype == "discord":
             body = json.dumps({"content": f"**{title}**\n{message}"}).encode("utf-8")
-            req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+            headers = {"Content-Type": "application/json", "User-Agent": ua}
         elif atype == "webhook":
             body = json.dumps({"title": title, "message": message}).encode("utf-8")
-            req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+            headers = {"Content-Type": "application/json", "User-Agent": ua}
         else:  # ntfy (default): plain-text body, title in a header
             body = message.encode("utf-8")
-            req = urllib.request.Request(
-                url, data=body,
-                headers={"Title": title, "Content-Type": "text/plain; charset=utf-8"},
-            )
+            headers = {"Title": title, "Content-Type": "text/plain; charset=utf-8", "User-Agent": ua}
+        req = urllib.request.Request(url, data=body, headers=headers)
         with urllib.request.urlopen(req, timeout=6) as resp:
             return 200 <= getattr(resp, "status", 200) < 300
     except Exception as e:
