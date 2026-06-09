@@ -112,7 +112,9 @@ export function LatencyChart({ data, hoverT, onHoverT, degradedMs = 0 }: {
   const clampSpan = (x1: number, x2: number) => ({ x1: Math.max(x1, tMin), x2: Math.min(x2, tMax) })
   const bands = outageSpans(data.buckets, data.bucket).map((b) => clampSpan(b.x1, b.x2)).filter((b) => b.x2 > b.x1)
   const brownBands = data.outages.filter((o) => o.kind === "slow").map((o) => clampSpan(o.start, o.end ?? data.now)).filter((b) => b.x2 > b.x1)
-  const gapBands = data.gaps.map((g) => clampSpan(g.start, g.end)).filter((b) => b.x2 > b.x1)
+  // Paused spans get their own blue band (matching the tracker); genuine no-data gaps stay grey.
+  const pausedBands = data.gaps.filter((g) => g.kind === "paused").map((g) => clampSpan(g.start, g.end)).filter((b) => b.x2 > b.x1)
+  const nodataBands = data.gaps.filter((g) => g.kind !== "paused").map((g) => clampSpan(g.start, g.end)).filter((b) => b.x2 > b.x1)
 
   // Least-squares trend over the visible (clamped) line, colored by direction: rising latency
   // (worse) is red, falling (better) is green, roughly flat is neutral amber.
@@ -206,10 +208,16 @@ export function LatencyChart({ data, hoverT, onHoverT, degradedMs = 0 }: {
             <ReferenceArea y1={degradedMs} y2={maxL} fill="var(--down)" fillOpacity={0.06}
               stroke="none" ifOverflow="visible" />
           )}
-          {/* Grey bands over no-data spans (reboot / pause): explains a gap that is not an outage. */}
-          {gapBands.map((b, i) => (
+          {/* Grey bands over genuine no-data spans (reboot / stall): a gap that is not an outage. */}
+          {nodataBands.map((b, i) => (
             <ReferenceArea key={`gap-${i}`} x1={b.x1} x2={b.x2}
               fill="var(--gap-band)" fillOpacity={0.6} stroke="none" ifOverflow="visible" />
+          ))}
+          {/* Blue bands over paused spans, labelled, so a pause never reads as "no data" or an outage. */}
+          {pausedBands.map((b, i) => (
+            <ReferenceArea key={`paused-${i}`} x1={b.x1} x2={b.x2}
+              fill="var(--paused)" fillOpacity={0.22} stroke="none" ifOverflow="visible"
+              label={{ value: "Paused", position: "center", fill: "var(--paused)", fontSize: 10 }} />
           ))}
           {/* Amber bands over brownout (sustained slow-but-up) events. */}
           {brownBands.map((b, i) => (
