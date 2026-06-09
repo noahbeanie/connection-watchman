@@ -4,7 +4,6 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { Card } from "@/components/ui/card"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -19,7 +18,6 @@ import { StatusBadge } from "@/components/StatusBadge"
 import { OutagesEmpty } from "@/components/OutagesEmpty"
 import { OutagesTimeline } from "@/components/OutagesTimeline"
 import { CauseLegend } from "@/components/CauseLegend"
-import { DnsSignal } from "@/components/DnsSignal"
 import { DateRangePicker } from "@/components/DateRangePicker"
 import { AlertSettings } from "@/components/AlertSettings"
 import { TargetsPopover } from "@/components/TargetsPopover"
@@ -185,7 +183,6 @@ export default function App() {
   // Outage list + DNS panel now follow the selected range (no longer a fixed 24h window), so
   // the list agrees with the gauge / Downtime / Outages tiles above it.
   const rangeNet = data ? data.outages.filter((o) => o.kind !== "dns") : []
-  const rangeDns = data ? data.outages.filter((o) => o.kind === "dns") : []
   const shownOut = showAllOut ? rangeNet : rangeNet.slice(0, 30)
   const wd = data ? data.end - data.start > 86400 : false
   // Latency headline from healthy (fully-up) buckets, with the same robust outlier fence the
@@ -288,13 +285,6 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {live?.dns_ok === false && (
-              <Badge variant="outline" className="gap-1.5 py-1.5 font-normal"
-                style={{ color: "var(--primary)", borderColor: "color-mix(in oklab, var(--primary) 45%, transparent)" }}>
-                <span className="inline-flex size-2 rounded-full" style={{ background: "var(--primary)" }} />
-                DNS degraded
-              </Badge>
-            )}
             {meta?.first_ts && (
               <span className="hidden text-xs font-medium text-foreground/90 sm:inline">
                 Scan running since {fmtSince(meta.first_ts)}
@@ -416,7 +406,6 @@ export default function App() {
                     )}
                   </>
                 : <OutagesEmpty />}
-            {data && <DnsSignal summary={data.summary} outages={rangeDns} live={live} />}
           </Card>
 
           <Card className="p-4 sm:p-5">

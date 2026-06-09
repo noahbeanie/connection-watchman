@@ -49,11 +49,16 @@ export function LatencyChart({ data, hoverT, onHoverT, degradedMs = 0 }: {
   // "no data", never a hidden high reading. Outlier spikes are CLAMPED to a robust ceiling (so
   // one slow burst can't blow out the axis or vanish); the tooltip still shows the true number.
   const mid = (i: number) => data.buckets[i].t + data.bucket / 2
-  const reals = data.buckets.map((b) => (b.avg != null ? b.avg : null))
+  // Times inside a recorded gap (paused or no-data). A boundary bucket can hold checks from just
+  // before/after the span, so null the line there too: the line then gaps cleanly under the band
+  // instead of poking a reading out past a pause.
+  const inGap = (t: number) => data.gaps.some((g) => t >= g.start && t < g.end)
+  const reals = data.buckets.map((b, i) => (b.avg != null && !inGap(mid(i)) ? b.avg : null))
   // A fully-up bucket with NO sample is a window whose outage was deleted (latency was cleared):
   // interpolate from the nearest real neighbors so the line fills in instead of gapping.
   const points = data.buckets.map((b, i) => {
     const t = mid(i)
+    if (inGap(t)) return { t, avg: null as number | null, up: b.up, total: b.total, est: false }
     if (reals[i] != null) return { t, avg: reals[i] as number, up: b.up, total: b.total, est: false }
     if (b.total > 0 && b.up === b.total) {
       let lo = i - 1
