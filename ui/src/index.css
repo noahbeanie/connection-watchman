@@ -145,6 +145,7 @@
   --down: oklch(0.68 0.21 22);
   --down-band: oklch(0.64 0.22 22 / 0.95);
   --gap-band: oklch(0.72 0.02 260 / 0.4);
+  --paused: oklch(0.6 0.1 265);
   --lat-line: oklch(0.9 0.1 210);
   --amber: oklch(0.84 0.14 92);
   --orange: oklch(0.77 0.16 58);

@@ -10,42 +10,47 @@ const causeColor: Record<string, string> = {
 interface Seg {
   t: number; end: number; up: number; total: number
   pct: number | null; avg: number | null; min: number | null; max: number | null
+  paused?: boolean
 }
 
-// Aggregate the adaptive buckets down to ~target fixed segments so the bar reads as a
-// classic status-page tracker, regardless of how many buckets the range made. Fewer
-// segments on phones so the bars stay wide enough to tap.
+// Slice the range into ~target fixed-width TIME segments (a classic status-page strip), then
+// derive each slice's state from the checks in it AND the paused / no-data spans. Going by time
+// (not by bucket index) means a paused or no-data stretch shows as itself, instead of letting an
+// adjacent bucket's colour smear across the whole gap. Fewer segments on phones so bars stay tappable.
 function toSegments(d: RangeData, target: number): Seg[] {
-  const b = d.buckets
-  let out: Seg[]
-  if (b.length <= target) {
-    out = b.map((x) => ({ t: x.t, end: 0, up: x.up, total: x.total, pct: x.pct, avg: x.avg, min: x.min, max: x.max }))
-  } else {
-    const group = Math.ceil(b.length / target)
-    out = []
-    for (let i = 0; i < b.length; i += group) {
-      const g = b.slice(i, i + group)
-      const up = g.reduce((s, x) => s + x.up, 0)
-      const total = g.reduce((s, x) => s + x.total, 0)
-      const avgs = g.map((x) => x.avg).filter((x): x is number => x != null)
-      const mins = g.map((x) => x.min).filter((x): x is number => x != null)
-      const maxs = g.map((x) => x.max).filter((x): x is number => x != null)
-      out.push({
-        t: g[0].t, end: 0, up, total,
-        pct: total ? (up / total) * 100 : null,
-        avg: avgs.length ? Math.round((avgs.reduce((a, c) => a + c, 0) / avgs.length) * 10) / 10 : null,
-        min: mins.length ? Math.min(...mins) : null,
-        max: maxs.length ? Math.max(...maxs) : null,
-      })
-    }
+  const span = Math.max(1, d.end - d.start)
+  const n = Math.max(1, Math.min(target, Math.round(span / d.bucket)))
+  const slice = span / n
+  const pausedSpans = d.gaps.filter((g) => g.kind === "paused")
+  const ov = (s: number, e: number, spans: { start: number; end: number }[]) =>
+    spans.reduce((a, g) => a + Math.max(0, Math.min(e, g.end) - Math.max(s, g.start)), 0)
+  const out: Seg[] = []
+  for (let i = 0; i < n; i++) {
+    const s = d.start + i * slice
+    const e = i === n - 1 ? d.end : s + slice
+    const bs = d.buckets.filter((b) => b.t < e && b.t + d.bucket > s)
+    const up = bs.reduce((a, b) => a + b.up, 0)
+    const total = bs.reduce((a, b) => a + b.total, 0)
+    const avgs = bs.map((b) => b.avg).filter((x): x is number => x != null)
+    const mins = bs.map((b) => b.min).filter((x): x is number => x != null)
+    const maxs = bs.map((b) => b.max).filter((x): x is number => x != null)
+    out.push({
+      t: s, end: e, up, total,
+      pct: total ? (up / total) * 100 : null,
+      avg: avgs.length ? Math.round((avgs.reduce((a, c) => a + c, 0) / avgs.length) * 10) / 10 : null,
+      min: mins.length ? Math.min(...mins) : null,
+      max: maxs.length ? Math.max(...maxs) : null,
+      // No checks here, and the slot is mostly inside a paused span -> "paused" (its own colour).
+      // Any other check-less slot stays "no data" grey.
+      paused: total === 0 && ov(s, e, pausedSpans) >= (e - s) * 0.5,
+    })
   }
-  // Each segment spans from its start to the next segment's start (range end for the last).
-  for (let i = 0; i < out.length; i++) out[i].end = i + 1 < out.length ? out[i + 1].t : d.end
   return out
 }
 
 function segColor(s: Seg): string {
-  if (s.total === 0 || s.pct == null) return "var(--gap-band)"
+  if (s.paused) return "var(--paused)" // monitoring was paused: not an outage
+  if (s.total === 0 || s.pct == null) return "var(--gap-band)" // no data
   if (s.up === s.total) return "var(--up)" // every check passed
   if (s.up === 0) return "var(--down)" // every check failed
   // Partially down: the more checks failed, the redder (amber -> red by down fraction).
@@ -143,8 +148,9 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
   const fmtPt = (t: number) => (data.bucket >= 86400 ? fmtDate(t) : fmtTime(t, wd))
   const info = activeSeg ? (() => {
     const sg = activeSeg
-    const noData = sg.total === 0 || sg.pct == null
-    const down = !noData && sg.up < sg.total
+    const paused = !!sg.paused
+    const noData = !paused && (sg.total === 0 || sg.pct == null)
+    const down = !paused && !noData && sg.up < sg.total
     const causes = down
       ? [...new Set(
           data.outages
@@ -154,9 +160,9 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
       : []
     return {
       when: sg.end - sg.t > 60 ? `${fmtPt(sg.t)} - ${fmtPt(sg.end)}` : fmtPt(sg.t),
-      noData, down,
-      status: noData ? "No data" : down ? (partial ? "Partial outage" : "Offline") : "Online",
-      statusColor: noData ? "var(--muted-foreground)" : down ? (partial ? "var(--amber)" : "var(--down)") : "var(--up)",
+      noData, down, paused,
+      status: paused ? "Paused" : noData ? "No data" : down ? (partial ? "Partial outage" : "Offline") : "Online",
+      statusColor: paused ? "var(--paused)" : noData ? "var(--muted-foreground)" : down ? (partial ? "var(--amber)" : "var(--down)") : "var(--up)",
       total: sg.total, avg: sg.avg,
       cause: causes[0] ?? "unknown",
       causeLabel: causes.length ? causes.map((c) => CAUSE_LABEL[c] ?? CAUSE_LABEL.unknown).join(", ") : CAUSE_LABEL.unknown,
@@ -241,6 +247,8 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
                   <div className="flex h-7 items-center text-[0.7rem] text-muted-foreground/60">Loading breakdown</div>
                 )}
               </div>
+            ) : info.paused ? (
+              <div className="mt-1 text-muted-foreground">Monitoring was paused for this window. Paused time is never counted as downtime.</div>
             ) : info.down ? (
               <div className="mt-1 text-muted-foreground">{info.explain || "The connection was down for this window."}</div>
             ) : info.noData ? (

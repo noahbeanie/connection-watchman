@@ -364,7 +364,7 @@ export default function App() {
               <div className="mb-1.5 flex items-center justify-between gap-3">
                 <h2 className="text-sm font-semibold tracking-tight">Uptime</h2>
                 <div className="hidden items-center gap-3 text-xs text-muted-foreground sm:flex">
-                  {[["var(--up)", "Up"], ["var(--amber)", "Partial"], ["var(--down)", "Down"], ["var(--gap-band)", "No data"]].map(([c, t]) => (
+                  {[["var(--up)", "Up"], ["var(--amber)", "Partial"], ["var(--down)", "Down"], ["var(--paused)", "Paused"], ["var(--gap-band)", "No data"]].map(([c, t]) => (
                     <span key={t} className="flex items-center gap-1.5">
                       <span className="inline-block size-2.5 rounded-sm" style={{ background: c }} />{t}
                     </span>
