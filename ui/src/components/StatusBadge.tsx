@@ -18,7 +18,7 @@ export function StatusBadge({ live, meta }: { live: Live | null; meta: Meta | nu
       variant="outline"
       onMouseEnter={() => setHov(true)}
       onMouseLeave={() => setHov(false)}
-      className="h-auto cursor-default gap-3 py-3 pl-5 pr-7 text-2xl font-semibold sm:text-3xl"
+      className="h-auto shrink-0 cursor-default gap-2 py-1.5 pl-3 pr-4 text-base font-semibold sm:gap-3 sm:py-3 sm:pl-5 sm:pr-7 sm:text-3xl"
       style={{
         background: `color-mix(in oklab, ${c} ${hov ? 20 : 13}%, var(--card))`,
         color: c,
@@ -27,11 +27,11 @@ export function StatusBadge({ live, meta }: { live: Live | null; meta: Meta | nu
         boxShadow: hov ? `0 0 22px 2px color-mix(in oklab, ${c} 45%, transparent)` : "0 0 0 0 transparent",
       }}
     >
-      <span className="relative flex size-4">
+      <span className="relative flex size-3 sm:size-4">
         {state === "up" && (
           <span className="absolute inline-flex h-full w-full animate-ping rounded-full opacity-60" style={{ background: c }} />
         )}
-        <span className="relative inline-flex size-4 rounded-full" style={{ background: c }} />
+        <span className="relative inline-flex size-3 rounded-full sm:size-4" style={{ background: c }} />
       </span>
       {text}
     </Badge>
