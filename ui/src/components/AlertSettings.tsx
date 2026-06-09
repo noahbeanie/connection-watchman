@@ -3,6 +3,7 @@ import { toast } from "sonner"
 import { Send } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { MiniSelect } from "@/components/MiniSelect"
 import type { AlertConfig } from "@/lib/types"
 
 const post = (p: string, body: unknown) =>
@@ -55,14 +56,7 @@ export function AlertSettings({ alerts, onSaved }: { alerts: AlertConfig; onSave
   return (
     <div className="space-y-2.5 text-xs">
       <div className="flex flex-wrap items-center gap-2">
-        <select
-          value={type} onChange={(e) => setType(e.target.value)} style={{ colorScheme: "dark" }}
-          className="cursor-pointer rounded-md border border-border bg-muted/40 px-2 py-1.5 font-mono text-xs outline-none transition-colors hover:border-foreground/30 focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          {TYPES.map((o) => (
-            <option key={o.v} value={o.v} style={{ backgroundColor: "var(--popover)", color: "var(--popover-foreground)" }}>{o.label}</option>
-          ))}
-        </select>
+        <MiniSelect value={type} options={TYPES} onChange={setType} />
         <Input
           value={url} onChange={(e) => setUrl(e.target.value)} placeholder={PLACEHOLDER[type]}
           autoComplete="off" spellCheck={false} inputMode="url"
