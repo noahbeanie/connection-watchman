@@ -31,7 +31,6 @@ export function AlertSettings({ alerts, onSaved }: { alerts: AlertConfig; onSave
     setUrl(alerts.url || "")
   }, [alerts.type, alerts.url])
 
-  // Recovery is the only alert now, so it's always on when a URL is set; degraded/brownout off.
   const persist = () => post("/api/alerts", { type, url: url.trim(), recovery: true, degraded: false })
 
   const save = async () => {
@@ -44,7 +43,7 @@ export function AlertSettings({ alerts, onSaved }: { alerts: AlertConfig; onSave
   const test = async () => {
     if (!url.trim()) { toast.error("Add a webhook URL first"); return }
     setTesting(true)
-    await persist()                        // save first so the test uses the current URL
+    await persist()
     const res = await post("/api/alert/test", {})
     setTesting(false)
     const body = await res.json().catch(() => ({}))
@@ -54,23 +53,27 @@ export function AlertSettings({ alerts, onSaved }: { alerts: AlertConfig; onSave
 
   return (
     <div className="space-y-2.5 text-xs">
-      <div className="flex flex-wrap items-center gap-2">
-        <select
-          value={type} onChange={(e) => setType(e.target.value)} style={{ colorScheme: "dark" }}
-          className="cursor-pointer rounded-md border border-border bg-muted/40 px-2 py-1.5 font-mono text-xs outline-none transition-colors hover:border-foreground/30 focus-visible:ring-2 focus-visible:ring-ring"
-        >
+      {/* Title with the channel toggle (two buttons) on the right of the same row. */}
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+        <h2 className="text-[0.95rem] font-semibold tracking-tight">Notify me when my connection returns</h2>
+        <div className="inline-flex shrink-0 rounded-md border border-border bg-muted/30 p-0.5">
           {TYPES.map((o) => (
-            <option key={o.v} value={o.v} style={{ backgroundColor: "var(--popover)", color: "var(--popover-foreground)" }}>{o.label}</option>
+            <button
+              key={o.v} type="button" onClick={() => setType(o.v)}
+              className={`rounded px-2.5 py-1 font-medium transition ${type === o.v ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
+            >
+              {o.label}
+            </button>
           ))}
-        </select>
-        <Input
-          value={url} onChange={(e) => setUrl(e.target.value)} placeholder={PLACEHOLDER[type]}
-          autoComplete="off" spellCheck={false} inputMode="url"
-          className="h-8 min-w-[11rem] flex-1 font-mono text-xs"
-        />
+        </div>
       </div>
+      <Input
+        value={url} onChange={(e) => setUrl(e.target.value)} placeholder={PLACEHOLDER[type]}
+        autoComplete="off" spellCheck={false} inputMode="url"
+        className="h-8 w-full font-mono text-xs"
+      />
       <div className="flex gap-2 pt-0.5">
-        <Button size="sm" variant="secondary" className="flex-1" disabled={saving} onClick={save}>
+        <Button size="sm" variant="secondary" disabled={saving} onClick={save}>
           {saving ? "Saving..." : "Save"}
         </Button>
         <Button size="sm" variant="outline" disabled={testing || !url.trim()} onClick={test}>

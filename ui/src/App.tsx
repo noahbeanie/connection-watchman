@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
-  Download, FileText, Gauge, Pause, Play, Siren, Trash2, TrendingDown, TrendingUp,
+  ChevronLeft, ChevronRight, Download, FileText, Gauge, Pause, Play, Siren, Trash2, TrendingDown, TrendingUp,
 } from "lucide-react"
 import { toast } from "sonner"
 import { Card } from "@/components/ui/card"
@@ -98,7 +98,7 @@ export default function App() {
   const [token, setToken] = useState("")
   const [resetOpen, setResetOpen] = useState(false)
   const [reportOpen, setReportOpen] = useState(false)
-  const [showAllOut, setShowAllOut] = useState(false)
+  const [outPage, setOutPage] = useState(0)
   const [nowTs, setNowTs] = useState(() => new Date())
   const [hoverT, setHoverT] = useState<number | null>(null)
   const booted = useRef(false)
@@ -115,6 +115,9 @@ export default function App() {
     const id = setInterval(loadRange, ms)
     return () => clearInterval(id)
   }, [preset, loadRange])
+
+  // Jump back to the first page of outages whenever the selected range changes.
+  useEffect(() => { setOutPage(0) }, [preset, customRange])
 
   // All-time fetch powers the lifetime stats in Data & tools (MTTR / MTBF / last outage).
   const loadOutages = useCallback(async () => {
@@ -183,7 +186,12 @@ export default function App() {
   // Outage list + DNS panel now follow the selected range (no longer a fixed 24h window), so
   // the list agrees with the gauge / Downtime / Outages tiles above it.
   const rangeNet = data ? data.outages.filter((o) => o.kind !== "dns") : []
-  const shownOut = showAllOut ? rangeNet : rangeNet.slice(0, 30)
+  // Paginate the outage list so the card can bottom-align with Data & tools instead of growing
+  // unbounded. Page size is fixed; pagination controls sit pinned at the bottom of the card.
+  const OUT_PAGE = 7
+  const outTotalPages = Math.max(1, Math.ceil(rangeNet.length / OUT_PAGE))
+  const outCurPage = Math.min(outPage, outTotalPages - 1)
+  const shownOut = rangeNet.slice(outCurPage * OUT_PAGE, (outCurPage + 1) * OUT_PAGE)
   const wd = data ? data.end - data.start > 86400 : false
   // Latency headline from healthy (fully-up) buckets, with the same robust outlier fence the
   // chart uses, so degraded-but-connected spikes near the timeout don't inflate Avg/Max.
@@ -387,16 +395,16 @@ export default function App() {
           </div>
         </div>
 
-        {/* Notifications + outages (left column) | data & tools (right column) */}
-        <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[1.7fr_1fr]">
+        {/* Notifications + outages (left column) | data & tools (right column).
+            Columns stretch to equal height so the Outages card bottom-aligns with Data & tools. */}
+        <div className="grid grid-cols-1 items-stretch gap-4 lg:grid-cols-[1.7fr_1fr]">
           <div className="flex flex-col gap-4">
             {meta && (
               <Card className="p-4 sm:p-5">
-                <h2 className="mb-3 text-[0.95rem] font-semibold tracking-tight">Notify me when my connection returns</h2>
                 <AlertSettings alerts={meta.alerts} onSaved={refetchMeta} />
               </Card>
             )}
-            <Card className="p-4 sm:p-5">
+            <Card className="flex grow flex-col p-4 sm:p-5">
               <h2 className="mb-3 text-[0.95rem] font-semibold tracking-tight">
                 Outages <span className="font-normal text-muted-foreground">({periodLabel})</span>
               </h2>
@@ -405,11 +413,20 @@ export default function App() {
                   ? <>
                       <CauseLegend />
                       <OutagesTimeline outages={shownOut} onSaveNote={saveOutageNote} onDelete={deleteOutage} />
-                      {rangeNet.length > 30 && (
-                        <button type="button" onClick={() => setShowAllOut((v) => !v)}
-                          className="mt-4 ml-1 text-xs font-medium text-primary transition hover:underline">
-                          {showAllOut ? "Show fewer" : `Show all ${rangeNet.length}`}
-                        </button>
+                      {outTotalPages > 1 && (
+                        <div className="mt-auto flex items-center justify-between gap-2 pt-4 text-xs text-muted-foreground">
+                          <button type="button" disabled={outCurPage === 0}
+                            onClick={() => setOutPage((p) => Math.max(0, p - 1))}
+                            className="inline-flex items-center gap-1 rounded-md px-2 py-1 font-medium transition hover:text-foreground disabled:pointer-events-none disabled:opacity-30">
+                            <ChevronLeft className="size-3.5" />Prev
+                          </button>
+                          <span className="tabular-nums">Page {outCurPage + 1} of {outTotalPages} &middot; {rangeNet.length} total</span>
+                          <button type="button" disabled={outCurPage >= outTotalPages - 1}
+                            onClick={() => setOutPage((p) => Math.min(outTotalPages - 1, p + 1))}
+                            className="inline-flex items-center gap-1 rounded-md px-2 py-1 font-medium transition hover:text-foreground disabled:pointer-events-none disabled:opacity-30">
+                            Next<ChevronRight className="size-3.5" />
+                          </button>
+                        </div>
                       )}
                     </>
                   : <OutagesEmpty />}
