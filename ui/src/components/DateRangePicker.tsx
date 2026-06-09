@@ -70,10 +70,19 @@ export function DateRangePicker({ firstTs, now, value, active, onApply }: {
   const dayDisabled = (d: Date) =>
     !!((minDate && d.getTime() < minDate.getTime()) || d.getTime() > maxDate.getTime())
 
+  const applyDay = (d: Date) => onApply(daySec(d), Math.min(daySec(d) + 86399, now))
+
   const pick = (d: Date) => {
     if (dayDisabled(d)) return
-    if (!from || (from && to)) { setFrom(d); setTo(null); return }
-    if (d.getTime() < from.getTime()) { setFrom(d); return }
+    // Fresh start (no start yet, a finished range, or a click before the current start): select
+    // just this one day and apply it right away, so picking a single day (e.g. "today") takes a
+    // single click. The popover stays open so a later second click can extend it to a range.
+    if (!from || to || d.getTime() < from.getTime()) {
+      setFrom(d); setTo(null)
+      applyDay(d)
+      return
+    }
+    // Second click on / after the start: complete a multi-day range and close.
     setTo(d)
     onApply(daySec(from), Math.min(daySec(d) + 86399, now))
     setOpen(false)
@@ -156,7 +165,7 @@ export function DateRangePicker({ firstTs, now, value, active, onApply }: {
             })}
           </div>
           <p className="mt-2 text-center text-[0.7rem] text-muted-foreground">
-            {!from ? "Pick a start date" : !to ? "Pick an end date" : fmtRangeShort(daySec(from), daySec(to))}
+            {!from ? "Pick a day" : !to ? "Click another day for a range" : fmtRangeShort(daySec(from), daySec(to))}
           </p>
         </div>,
         document.body,
