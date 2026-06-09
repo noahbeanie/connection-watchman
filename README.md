@@ -11,6 +11,20 @@ dashboard so you can see exactly how often (and why) your connection drops.
 - **Survives reboots & crashes.** Runs as two always-on background services (systemd on
   Linux, launchd on macOS, Scheduled Tasks on Windows) with auto-restart.
 
+## Screenshots
+
+![Connection Watchman dashboard](docs/screenshots/dashboard.png)
+
+*Availability gauge, uptime timeline, and latency chart for any range (1H through all-time, or a single custom day).*
+
+![Notifications, outage log, and data tools](docs/screenshots/data-and-tools.png)
+
+*Recovery notifications, the per-range outage log, and the settings, export, and pause tools.*
+
+![Interactive hover detail on the uptime and latency charts](docs/screenshots/hover-detail.png)
+
+*Hover any point on the uptime or latency charts to see what happened: the cause, the up/down check breakdown, and the latency for that moment.*
+
 ## Install
 
 One command sets up the monitor + dashboard as always-on background services that start
