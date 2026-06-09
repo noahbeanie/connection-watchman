@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { toast } from "sonner"
-import { Send } from "lucide-react"
+import { Save as SaveIcon, Send } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import type { AlertConfig } from "@/lib/types"
@@ -74,17 +74,22 @@ export function AlertSettings({ alerts, onSaved }: { alerts: AlertConfig; onSave
       />
       <div className="flex gap-2 pt-0.5">
         <Button size="sm" variant="secondary" disabled={saving} onClick={save}>
-          {saving ? "Saving..." : "Save"}
+          <SaveIcon className="size-3.5" />{saving ? "Saving..." : "Save"}
         </Button>
         <Button size="sm" variant="outline" disabled={testing || !url.trim()} onClick={test}>
           <Send className="size-3.5" />{testing ? "Sending" : "Test"}
         </Button>
       </div>
-      <p className="text-[0.7rem] leading-relaxed text-muted-foreground/70">
-        {type === "discord"
-          ? "Paste a Discord channel webhook URL (Server Settings -> Integrations -> Webhooks). Test sends a sample message to that channel."
-          : "Any endpoint; it receives a JSON POST { \"title\", \"message\" }. To try it, point it at a receiver like webhook.site and hit Test."}
-      </p>
+      {/* Both hints share one grid cell, so the tile keeps the height of the taller hint and
+          doesn't jump when you toggle between Discord and Webhook. */}
+      <div className="grid text-[0.7rem] leading-relaxed text-muted-foreground/70">
+        <p className={`col-start-1 row-start-1 ${type === "discord" ? "" : "invisible"}`}>
+          {"Paste a Discord channel webhook URL (Server Settings -> Integrations -> Webhooks). Test sends a sample message to that channel."}
+        </p>
+        <p className={`col-start-1 row-start-1 ${type === "webhook" ? "" : "invisible"}`}>
+          {"Any endpoint; it receives a JSON POST { \"title\", \"message\" }. To try it, point it at a receiver like webhook.site and hit Test."}
+        </p>
+      </div>
     </div>
   )
 }
