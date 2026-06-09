@@ -232,10 +232,11 @@ export default function App() {
   // All-time stats (from the first-check fetch) + live, for the Data & tools panel.
   // MTTR / last outage come from server-side aggregates over ALL outages — the outages
   // array is capped at 200 rows, so deriving stats from it would silently truncate.
+  // The net-only fields are used here because these rows are labeled "connectivity".
   const at = allOutages?.summary
-  const mttr = at?.mttr_s ?? null
+  const mttr = at?.mttr_net_s ?? null
   const mtbf = at && at.outage_count > 0 ? at.monitored_seconds / at.outage_count : null
-  const lastOut = at?.last_outage_start ?? null
+  const lastOut = at?.last_net_outage_start ?? null
   const liveLat = live?.latency_ms != null ? `${live.latency_ms} ms` : live?.status === "down" ? "Offline" : "—"
   const dataSections: { title: string; rows: { label: string; hint: ReactNode; value?: ReactNode; control?: ReactNode }[] }[] = meta
     ? [

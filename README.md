@@ -61,13 +61,15 @@ must also answer within the **response cutoff** (dashboard setting, default 1s),
 reachable-but-crawling link counts as down. TCP-connect is used over ICMP because it needs no
 root and isn't rate-limited. Latency is the connect that answered.
 
-**DNS** is checked separately: resolve via the system resolver, then fall back to public resolvers
-before declaring DNS down (only while the line is up). A confirmed DNS failure means no usable
-internet on any device, so it counts as downtime, but it's recorded as its own kind so you can
-tell a DNS outage apart from a line drop.
+**DNS** is checked separately (only while the line is up): several unrelated well-known names are
+resolved via the system resolver, then directly against public resolvers. DNS counts as down only
+when every name fails on every path, so one flaky forwarder or one zone's bad day is never logged
+as your outage. A confirmed DNS failure means no usable internet on any device, so it counts as
+downtime, recorded as its own kind so you can tell a DNS outage apart from a line drop.
 
 Each outage stores its exact start/end and a **cause**, found by probing the LAN gateway only
-when connectivity fails:
+when connectivity fails. The recorded cause is the one that **dominated** the outage by time, so
+power-cycling your router for a minute during a long ISP outage doesn't relabel it as your fault:
 
 | Cause | Meaning |
 |-------|---------|

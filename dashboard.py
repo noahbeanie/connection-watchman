@@ -161,14 +161,22 @@ def _subtract(base, cuts):
     return out
 
 
+def _overlap_total(s, e, iv):
+    """Seconds of (s, e) covered by the merged interval list iv."""
+    return sum(max(0, min(e, ce) - max(s, cs)) for cs, ce in iv)
+
+
 def get_gaps(conn, start, end, now):
     """No-data spans (reboots + pauses) overlapping the window.
-    Returns list of (s, e, kind). Tolerates a pre-migration DB with no events."""
+    Returns list of (s, e, kind). Tolerates a pre-migration DB with no events.
+    Events are fetched WITHOUT an upper ts bound: a gap event is stamped at the gap's
+    END with a backward-looking span, so one ending just after the window (e.g. monitor
+    off 23:50-00:30, range = yesterday) still has to contribute its in-window part -
+    filtering ts<=end dropped it and counted that span as monitored-up."""
     try:
         rows = conn.execute(
             "SELECT ts, kind, detail FROM events "
-            "WHERE kind IN ('gap','pause','resume') AND ts<=? ORDER BY ts",
-            (end,),
+            "WHERE kind IN ('gap','pause','resume') ORDER BY ts",
         ).fetchall()
     except sqlite3.OperationalError:
         return []
@@ -205,7 +213,11 @@ def get_live(conn, now):
     stale_after = max(30, interval * 6)
     try:
         import monitor as _mon
-        stale_after = max(stale_after, int(_mon.gap_threshold(interval, len(_mon.cfg_targets(conn)))) + interval)
+        # budget with the LIVE response cutoff: at a 2-3s cutoff a fully failing cycle
+        # legitimately runs longer, and a too-small bound flips the header to "No
+        # signal" in the middle of a real outage
+        stale_after = max(stale_after, int(_mon.gap_threshold(
+            interval, len(_mon.cfg_targets(conn)), cfg_get(conn, "timeout_ms") / 1000.0)) + interval)
     except Exception:
         pass
     latest = conn.execute(
@@ -233,6 +245,18 @@ def get_live(conn, now):
     else:
         nxt = conn.execute("SELECT MIN(ts) m FROM checks WHERE ts > ?", (flip["ts"],)).fetchone()
         streak_since = nxt["m"] if nxt and nxt["m"] is not None else latest["ts"]
+    # A streak is a claim of CONTINUOUS observation: it must not silently bridge
+    # unmonitored time. Clamp its start to the newest no-data boundary inside it
+    # (gap events are stamped at the gap's end; 'resume' ends a pause; 'clockstep'
+    # marks a timeline integrity break).
+    try:
+        ev = conn.execute(
+            "SELECT MAX(ts) m FROM events WHERE kind IN ('gap','resume','clockstep')"
+        ).fetchone()
+        if ev and ev["m"] is not None and ev["m"] > streak_since:
+            streak_since = min(ev["m"], latest["ts"])
+    except sqlite3.OperationalError:
+        pass
     streak_s = now - streak_since
 
     return {
@@ -247,9 +271,22 @@ def get_live(conn, now):
     }
 
 
-def first_ts(conn):
-    row = conn.execute("SELECT MIN(ts) m FROM checks").fetchone()
-    return row["m"]
+def first_record_ts(conn):
+    """Earliest recorded moment across ALL tables, not just checks. Check rows are
+    trimmed by retention while outage/event history is kept forever; anchoring
+    "all time" to MIN(checks.ts) silently shrank it to the retention window and
+    dropped older outages from the All view."""
+    vals = []
+    for sql in ("SELECT MIN(ts) m FROM checks",
+                "SELECT MIN(start_ts) m FROM outages",
+                "SELECT MIN(ts) m FROM events"):
+        try:
+            r = conn.execute(sql).fetchone()
+            if r and r["m"] is not None:
+                vals.append(r["m"])
+        except sqlite3.OperationalError:
+            pass
+    return min(vals) if vals else None
 
 
 def _has_col(conn, table, col):
@@ -260,8 +297,12 @@ def build_range(conn, start, end):
     now = int(time.time())
     start = max(0, int(start))
     end = int(end)
+    # The future hasn't been monitored. An end past `now` would sit in the availability
+    # denominator as monitored-up time and dilute every number (a "today" range asked at
+    # 6am would read ~100% no matter what happened) - clamp before any math.
+    end = min(end, now)
     if end <= start:
-        end = start + 1
+        start = end - 1
     window = end - start
     bucket = pick_bucket(window)
 
@@ -292,6 +333,11 @@ def build_range(conn, start, end):
             "max": round(row["max_lat"], 1) if row["max_lat"] is not None else None,
         })
 
+    # No-data spans first: the outage aggregation below corrects durations against them.
+    gaps = get_gaps(conn, start, end, now)
+    gap_merged = _merge([(g[0], g[1]) for g in gaps])
+    gap_seconds = _total(gap_merged)
+
     has_cause = _has_col(conn, "outages", "cause")
     has_kind = _has_col(conn, "outages", "kind")
     has_note = _has_col(conn, "outages", "note")
@@ -317,21 +363,33 @@ def build_range(conn, start, end):
     outages = []
     net_iv, dns_iv = [], []
     net_count, dns_count = 0, 0
-    # Aggregates over ALL overlapping outages (the JSON list below is capped at 200, so
-    # the client must never derive stats from it): mean time to recover and the most
-    # recent outage start.
-    mttr_sum, mttr_n, last_outage_start = 0, 0, None
+    # Aggregates over ALL overlapping outages (the JSON list below is capped at 200, so the
+    # client must never derive stats from it), kept PER KIND so connectivity-labeled stats
+    # never silently mix in DNS events. MTTR durations exclude no-data overlap: an outage
+    # closed at a restart shouldn't count the unmonitored span as time-to-recover.
+    mttr = {"net": [0, 0], "dns": [0, 0]}                # kind -> [sum_seconds, count]
+    last_outage_start = last_net_outage_start = None
+    longest_net = 0
     for row in raw:
         kind = row["kind"] or "net"
         if kind in ("slow", "unstable"):   # removed quality signals; ignore any legacy rows
             continue
         ongoing = row["end_ts"] is None
         o_end = now if ongoing else row["end_ts"]
+        a, b = max(row["start_ts"], start), min(o_end, end)
+        if b <= a:
+            continue   # touches the boundary with zero overlap: belongs to the adjacent range
         if not ongoing:
-            mttr_sum += o_end - row["start_ts"]
-            mttr_n += 1
+            dur = (o_end - row["start_ts"]) - _overlap_total(row["start_ts"], o_end, gap_merged)
+            k = mttr["dns" if kind == "dns" else "net"]
+            k[0] += max(0, dur)
+            k[1] += 1
         if last_outage_start is None or row["start_ts"] > last_outage_start:
             last_outage_start = row["start_ts"]
+        if kind != "dns":
+            if last_net_outage_start is None or row["start_ts"] > last_net_outage_start:
+                last_net_outage_start = row["start_ts"]
+            longest_net = max(longest_net, o_end - row["start_ts"])
         outages.append({
             "id": row["id"],
             "start": row["start_ts"], "end": row["end_ts"], "ongoing": ongoing,
@@ -339,32 +397,28 @@ def build_range(conn, start, end):
             "cause": row["cause"] or "unknown", "kind": kind,
             "note": row["note"],
         })
-        a, b = max(row["start_ts"], start), min(o_end, end)
         if kind == "dns":
             dns_count += 1
-            if b > a:
-                dns_iv.append((a, b))
+            dns_iv.append((a, b))
         else:
             net_count += 1
-            if b > a:
-                net_iv.append((a, b))
+            net_iv.append((a, b))
 
     # gap-corrected availability: gaps count as neither up nor down. Downtime = time the internet
     # was unusable, which includes BOTH connectivity (net) outages AND confirmed DNS outages (DNS
     # down on every resolver = no usable internet). The two never overlap (DNS is only probed while
     # the line is up), so merging them is exact. dns_seconds is also kept on its own as a breakdown.
-    gaps = get_gaps(conn, start, end, now)
-    gap_merged = _merge([(g[0], g[1]) for g in gaps])
-    gap_seconds = _total(gap_merged)
     down_iv = _subtract(_merge(net_iv + dns_iv), gap_merged)   # net + DNS time minus gaps
     down_seconds = _total(down_iv)
     dns_seconds = _total(_subtract(_merge(dns_iv), gap_merged))
     monitored = max(0, window - gap_seconds)
     availability = ((monitored - down_seconds) / monitored * 100.0) if monitored > 0 else None
+    mttr_all_n = mttr["net"][1] + mttr["dns"][1]
+    mttr_all_s = ((mttr["net"][0] + mttr["dns"][0]) / mttr_all_n) if mttr_all_n else None
 
     return {
         "start": start, "end": end, "now": now, "bucket": bucket,
-        "interval": INTERVAL, "first_ts": first_ts(conn),
+        "interval": cfg_get(conn, "interval"), "first_ts": first_record_ts(conn),
         "summary": {
             "availability_pct": availability,
             "pct": sample_pct,                      # sample-based, for reference
@@ -378,8 +432,14 @@ def build_range(conn, start, end):
             "dns_events": dns_count,                # DNS-only breakdown
             "dns_seconds": dns_seconds,
             "dns_h": fmt_dur(dns_seconds),
-            "mttr_s": (mttr_sum / mttr_n) if mttr_n else None,   # mean time to recover (completed outages)
+            # mean time to recover over completed outages, gap-corrected; per kind so
+            # connectivity-labeled stats never mix in DNS events
+            "mttr_s": mttr_all_s,
+            "mttr_net_s": (mttr["net"][0] / mttr["net"][1]) if mttr["net"][1] else None,
+            "mttr_dns_s": (mttr["dns"][0] / mttr["dns"][1]) if mttr["dns"][1] else None,
             "last_outage_start": last_outage_start,
+            "last_net_outage_start": last_net_outage_start,
+            "longest_net_s": longest_net,
             "avg_lat": round(s["avg_lat"], 1) if s["avg_lat"] is not None else None,
             "min_lat": round(s["min_lat"], 1) if s["min_lat"] is not None else None,
             "max_lat": round(s["max_lat"], 1) if s["max_lat"] is not None else None,
@@ -433,13 +493,13 @@ def build_meta(conn):
         import monitor as _mon
         targets = [{"host": h, "port": p} for h, p in _mon.cfg_targets(conn)]
         resolvers = list(_mon.DNS_RESOLVERS)
-        dns_host = _mon.DNS_PROBE_HOST
+        dns_host = ", ".join(_mon.DNS_PROBE_HOSTS)
     except Exception:
         targets, resolvers, dns_host = [], [], None
     targets_custom = bool(m("cfg_targets"))
     paused, pause_until = pause_status()
     return {
-        "first_ts": first_ts(conn),
+        "first_ts": first_record_ts(conn),
         "db_size_bytes": size,
         "paused": paused,
         "pause_until": pause_until,
@@ -486,7 +546,7 @@ class Handler(BaseHTTPRequestHandler):
         start = _int(q.get("start", [0]), 0)
         end = _int(q.get("end", [now]), now)
         if start <= 0:
-            fts = first_ts(conn)
+            fts = first_record_ts(conn)
             start = fts if fts is not None else now - 3600
         return start, end
 
@@ -607,18 +667,21 @@ class Handler(BaseHTTPRequestHandler):
         conn = db()
         has_gw = _has_col(conn, "checks", "gw")
         has_dns = _has_col(conn, "checks", "dns")
+        has_target = _has_col(conn, "checks", "target")
         conn.close()
-        cols = "ts, up, latency_ms" + (", gw" if has_gw else "") + (", dns" if has_dns else "")
+        cols = "ts, up, latency_ms" + (", gw" if has_gw else "") + (", dns" if has_dns else "") \
+            + (", target" if has_target else "")
 
         def fmt(r):
             lat = "" if r["latency_ms"] is None else f'{r["latency_ms"]:.1f}'
             gw = (r["gw"] if has_gw and r["gw"] is not None else "")
             dns = (r["dns"] if has_dns and r["dns"] is not None else "")
-            return f'{iso(r["ts"])},{r["up"]},{lat},{gw},{dns}\n'
+            tgt = (r["target"] if has_target and r["target"] is not None else "")
+            return f'{iso(r["ts"])},{r["up"]},{lat},{gw},{dns},{tgt}\n'
 
         self._stream_csv(
             f"checks_{start}_{end}.csv",
-            "timestamp_utc,connectivity_up,latency_ms,gateway_reachable,dns_ok",
+            "timestamp_utc,connectivity_up,latency_ms,gateway_reachable,dns_ok,target_answered",
             f"SELECT {cols} FROM checks WHERE ts>=? AND ts<? ORDER BY ts",
             (start, end), fmt,
         )
@@ -653,11 +716,13 @@ class Handler(BaseHTTPRequestHandler):
             return (f'{r["id"]},{iso(r["start_ts"])},{end_iso},'
                     f'{dur},{fmt_dur(dur)},{cause},{kind},{1 if ongoing else 0},"{note}"\n')
 
+        # legacy 'slow'/'unstable' rows (removed quality signals) are filtered like the UI
+        kind_where = " AND (kind IS NULL OR kind NOT IN ('slow','unstable'))" if has_kind else ""
         self._stream_csv(
             f"outages_{start}_{end}.csv",
             "outage_id,start_time_utc,end_time_utc,duration_seconds,duration_human,cause,outage_type,is_ongoing,note",
             f"SELECT id, start_ts, end_ts, duration_s, {cause_sel}, {kind_sel}, {note_sel} FROM outages "
-            "WHERE start_ts < ? AND (end_ts IS NULL OR end_ts >= ?) ORDER BY start_ts",
+            f"WHERE start_ts < ? AND (end_ts IS NULL OR end_ts >= ?){kind_where} ORDER BY start_ts",
             (end, start), fmt,
         )
 
@@ -799,6 +864,17 @@ class Handler(BaseHTTPRequestHandler):
                     if (row["kind"] or "net") == "net":
                         conn.execute("UPDATE checks SET up=1, latency_ms=NULL WHERE ts>=? AND ts<?",
                                      (row["start_ts"], row["end_ts"]))
+                    # audit trail: deleting an outage rewrites the record, so leave a
+                    # tamper-evident event for anyone auditing exported data later
+                    try:
+                        conn.execute(
+                            "INSERT INTO events (ts, kind, detail) VALUES (?, 'outage_deleted', ?)",
+                            (int(time.time()), json.dumps({
+                                "id": oid, "start": row["start_ts"], "end": row["end_ts"],
+                                "kind": row["kind"] or "net"})),
+                        )
+                    except sqlite3.OperationalError:
+                        pass
                     conn.execute("DELETE FROM outages WHERE id=?", (oid,))
                     conn.execute("COMMIT")
                     self._send(200, json.dumps({"ok": True, "id": oid}), "application/json")

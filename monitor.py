@@ -7,23 +7,27 @@ Runs forever. Every INTERVAL seconds (default 15) it measures two things:
   1. CONNECTIVITY  (the headline "uptime"): TCP connect to several public DNS
      servers by IP (1.1.1.1, 8.8.8.8, 9.9.9.9). "up" if ANY answers. To avoid
      false alarms from a single dropped packet, a failed check is retried a few
-     times over a few seconds before it is believed (CONFIRM_RETRIES). The
-     fastest successful connect is recorded as the latency.
+     times over a few seconds before it is believed (CONFIRM_RETRIES). The first
+     target that answers is recorded, along with its connect latency.
 
-  2. DNS  (a SEPARATE signal that does NOT affect the uptime score): can a name
-     be resolved? First via the system resolver (what your own devices use,
-     usually the router), and if that fails, directly against several independent
-     public resolvers before DNS is declared down. This keeps a flaky router DNS
-     forwarder from masquerading as an internet outage.
+  2. DNS: can well-known names be resolved? Each probe name is tried via the
+     system resolver first (what your own devices use, usually the router), then
+     directly against several independent public resolvers. DNS is declared down
+     only when EVERY name fails on EVERY path, so one flaky forwarder or one
+     zone having a bad day is never logged as your outage.
 
 Connectivity down-stretches are recorded as outages of kind "net" with a cause:
   - "local"   : the LAN/router itself is unreachable (your equipment / the Pi).
   - "isp"     : the router is fine but the internet is not (ISP / WAN).
   - "unknown" : couldn't determine (gateway address not known).
-DNS down-stretches are recorded as outages of kind "dns" (cause "dns") and are
-reported separately; they never count against uptime. DNS is only evaluated
-while connectivity is up (when the line is down, DNS fails too and is already
-covered by the connectivity outage).
+An outage's headline cause is the one that DOMINATED it (most attributed time),
+not the worst one ever seen, so briefly power-cycling the router during a long
+ISP outage doesn't relabel the whole thing "local".
+DNS down-stretches are recorded as outages of kind "dns" (cause "dns"). A
+confirmed DNS failure means no usable internet on any device, so it counts as
+downtime, kept as its own kind so a DNS outage is distinguishable from a line
+drop. DNS is only evaluated while connectivity is up (when the line is down,
+DNS fails too and is already covered by the connectivity outage).
 
 Reboots / pauses create GAPS in the log; gaps are recorded as events and count
 as neither up nor down (so they can never inflate uptime). Raw per-check rows
@@ -40,6 +44,7 @@ import sqlite3
 import signal
 import struct
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -50,7 +55,12 @@ INTERVAL = float(os.environ.get("UPTIME_INTERVAL", "15"))       # seconds betwee
 TIMEOUT = float(os.environ.get("UPTIME_TIMEOUT", "1.5"))       # internet connect timeout
 GW_TIMEOUT = float(os.environ.get("UPTIME_GW_TIMEOUT", "1"))   # gateway connect timeout
 DNS_TIMEOUT = float(os.environ.get("UPTIME_DNS_TIMEOUT", "2")) # name resolution timeout
-DNS_PROBE_HOST = os.environ.get("UPTIME_DNS_HOST", "example.com")
+# Names used to test DNS (comma-separated to override). Several UNRELATED zones on purpose:
+# a DNS failure counts as downtime, so it must take every name failing on every resolver,
+# never one zone's bad day, to register. Probing short-circuits on the first success.
+DNS_PROBE_HOSTS = [h.strip() for h in os.environ.get(
+    "UPTIME_DNS_HOST", "example.com,cloudflare.com,wikipedia.org").split(",") if h.strip()] \
+    or ["example.com"]
 GATEWAY_IP = os.environ.get("UPTIME_GATEWAY")                  # blank -> auto-discover
 RETENTION_DAYS = int(os.environ.get("UPTIME_RETENTION_DAYS", "365"))
 OUTAGE_RETENTION_DAYS = int(os.environ.get("UPTIME_OUTAGE_RETENTION_DAYS", "0"))  # 0 = forever
@@ -103,17 +113,20 @@ DNS_RESOLVERS = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
 GATEWAY_PORTS = (80, 443, 53)
 
 # Worst-case time a single cycle's probes can block (all timeouts hit, retries
-# burned, getaddrinfo stalls). A "gap" (reboot / the monitor not running) is only
+# burned, resolvers stall). A "gap" (reboot / the monitor not running) is only
 # declared when the gap between checks exceeds this, so a slow cycle during an
 # outage is never mistaken for missing data and never masks the outage. Scales with
-# the number of targets, since a custom target list changes the worst-case probe time.
-def probe_budget(n_targets):
-    return (n_targets * TIMEOUT) * (1 + CONFIRM_RETRIES) + CONFIRM_RETRIES * RETRY_GAP \
-        + len(GATEWAY_PORTS) * GW_TIMEOUT + (1 + len(DNS_RESOLVERS)) * DNS_TIMEOUT
-def gap_threshold(interval, n_targets=len(TARGETS)):
+# the number of targets AND the live response cutoff: the loop probes with the
+# user-set timeout_ms, so budgeting with a smaller constant would make every fully
+# failing cycle look like a gap and reclassify real downtime as no-data.
+def probe_budget(n_targets, timeout=TIMEOUT):
+    return (n_targets * timeout) * (1 + CONFIRM_RETRIES) + CONFIRM_RETRIES * RETRY_GAP \
+        + len(GATEWAY_PORTS) * GW_TIMEOUT \
+        + len(DNS_PROBE_HOSTS) * (1 + len(DNS_RESOLVERS)) * DNS_TIMEOUT
+def gap_threshold(interval, n_targets=len(TARGETS), timeout=TIMEOUT):
     """A gap (reboot / monitor down) is only declared when the time between checks
     exceeds this; scales with the current interval so a slower cadence isn't a gap."""
-    return max(2 * interval, probe_budget(n_targets) + interval)
+    return max(2 * interval, probe_budget(n_targets, timeout) + interval)
 
 # severity ordering so a connectivity outage reports the worst cause observed
 CAUSE_SEVERITY = {"unknown": 0, "isp": 2, "local": 3}
@@ -126,6 +139,23 @@ GW_REDISCOVER_S = 300    # re-discover the gateway at most this often (router IP
 
 def _now():
     return int(time.time())
+
+
+# A wall-vs-monotonic divergence bigger than this is a clock STEP (NTP jump, manual
+# change), which would corrupt the timeline if written through. Sleep/scheduling
+# jitter is well under it.
+CLOCK_STEP_S = 30
+_HAS_BOOTTIME = hasattr(time, "CLOCK_BOOTTIME")
+
+
+def _mono_boot():
+    """Monotonic seconds INCLUDING time spent suspended where the platform offers it
+    (CLOCK_BOOTTIME on Linux), so wall-vs-monotonic drift means a clock step, never a
+    host sleep. Where unavailable, forward-step detection is disabled (a laptop waking
+    from sleep would otherwise look like a step) and only backward steps are handled."""
+    if _HAS_BOOTTIME:
+        return time.clock_gettime(time.CLOCK_BOOTTIME)
+    return time.monotonic()
 
 
 # ---- probes -----------------------------------------------------------------
@@ -184,16 +214,24 @@ def check_connectivity(targets=TARGETS, timeout=TIMEOUT):
 
 
 def _resolve_system(host):
-    """True if the system resolver (what your devices use) resolves the name."""
-    old = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(DNS_TIMEOUT)
-    try:
-        socket.getaddrinfo(host, 80, type=socket.SOCK_STREAM)
-        return True
-    except OSError:
-        return False
-    finally:
-        socket.setdefaulttimeout(old)
+    """True if the system resolver (what your devices use) resolves the name.
+    getaddrinfo ignores socket timeouts (the libc resolver runs its own multi-second
+    retry schedule, 10-30s worst case), so it runs on a disposable daemon thread
+    bounded by DNS_TIMEOUT: a hung resolver costs the cycle at most DNS_TIMEOUT and
+    falls through to the direct public-resolver probes."""
+    res = []
+
+    def _work():
+        try:
+            socket.getaddrinfo(host, 80, type=socket.SOCK_STREAM)
+            res.append(True)
+        except OSError:
+            res.append(False)
+
+    t = threading.Thread(target=_work, daemon=True)
+    t.start()
+    t.join(DNS_TIMEOUT)
+    return bool(res and res[0])
 
 
 def _dns_query_udp(resolver, host, timeout):
@@ -222,15 +260,18 @@ def _dns_query_udp(resolver, host, timeout):
         return False
 
 
-def probe_dns(host):
-    """True if the name resolves. Checks the system resolver first (what your
-    devices use); if that fails, confirms against independent public resolvers
-    before declaring DNS down, so one flaky forwarder is not a false alarm."""
-    if _resolve_system(host):
-        return True
-    for r in DNS_RESOLVERS:
-        if _dns_query_udp(r, host, DNS_TIMEOUT):
+def probe_dns(hosts=None):
+    """True if ANY probe name resolves anywhere. Each name is tried via the system
+    resolver first (what your devices use), then against independent public
+    resolvers. DNS is declared down only when EVERY name fails on EVERY path, so a
+    flaky forwarder or a single zone's outage is never a false alarm. Short-circuits
+    on the first success, so the healthy path costs a single lookup."""
+    for host in (hosts or DNS_PROBE_HOSTS):
+        if _resolve_system(host):
             return True
+        for r in DNS_RESOLVERS:
+            if _dns_query_udp(r, host, DNS_TIMEOUT):
+                return True
     return False
 
 
@@ -392,9 +433,10 @@ def init_db(conn):
     _add_col(conn, "checks", "gw", "INTEGER")     # gateway reachable (1/0/NULL)
     _add_col(conn, "checks", "dns", "INTEGER")    # name resolution ok (1/0/NULL)
     _add_col(conn, "checks", "target", "TEXT")    # which "host:port" answered the check (diagnostic)
-    _add_col(conn, "outages", "cause", "TEXT")    # local | isp | dns | unknown
+    _add_col(conn, "outages", "cause", "TEXT")    # local | isp | dns | unknown (dominant)
     _add_col(conn, "outages", "kind", "TEXT")     # net (connectivity) | dns
     _add_col(conn, "outages", "note", "TEXT")     # optional user-entered annotation
+    _add_col(conn, "outages", "causes", "TEXT")   # JSON seconds-per-cause tally for the outage
     # backfill: legacy DNS-caused outages become their own signal; the rest are
     # connectivity. This retroactively stops old DNS blips from counting as
     # downtime.
@@ -407,7 +449,7 @@ def init_db(conn):
         CREATE TABLE IF NOT EXISTS events (
             id     INTEGER PRIMARY KEY AUTOINCREMENT,
             ts     INTEGER NOT NULL,
-            kind   TEXT NOT NULL,        -- start | stop | pause | resume | gap | gateway
+            kind   TEXT NOT NULL,        -- start|stop|pause|resume|gap|gateway|clockstep|outage_deleted
             detail TEXT
         )
     """)
@@ -581,6 +623,34 @@ def log_event(conn, now, kind, detail=None):
     conn.execute("INSERT INTO events (ts, kind, detail) VALUES (?, ?, ?)", (now, kind, detail))
 
 
+def reconcile_pause_state(conn, now):
+    """Close a dangling pause at startup. A timed pause can expire (or the file be
+    removed) while the daemon is down; the matching 'resume' event is then never
+    written, and the dashboard would count everything since the old 'pause' as paused
+    time - collapsing the availability denominator and subtracting real outages out of
+    downtime. If the newest pause/resume event is an unmatched 'pause' and we are NOT
+    currently paused, write the missing resume: at the recorded expiry when the pause
+    was timed, else now."""
+    row = conn.execute("SELECT ts, kind FROM events WHERE kind IN ('pause','resume') "
+                       "ORDER BY ts DESC, id DESC LIMIT 1").fetchone()
+    if row is None or row[1] != "pause":
+        return
+    expiry = None
+    try:        # capture a timed pause's expiry BEFORE pause_until() auto-clears the file
+        with open(PAUSE_FILE) as f:
+            raw = f.read().strip()
+            if raw:
+                expiry = int(float(raw))
+    except (OSError, ValueError):
+        pass
+    if pause_until() is not None:
+        return  # genuinely still paused; the loop writes the resume when it ends
+    ts = expiry if (expiry and row[0] < expiry <= now) else now
+    log_event(conn, ts, "resume", "reconciled at startup")
+    print(f"[{datetime.now(timezone.utc).isoformat()}] closed a dangling pause "
+          f"(resume reconciled at {datetime.fromtimestamp(ts, timezone.utc).isoformat()})", flush=True)
+
+
 def last_state(conn):
     """Return (prev_up: bool|None, prev_dns: bool|None, ts: int|None) for the
     most recent check. prev_dns is None when DNS wasn't evaluated (line down)."""
@@ -601,12 +671,15 @@ def open_outage(conn, kind):
 
 
 def record_transition(conn, now, kind, went_up, cause=None):
+    """Idempotent: opens an outage only if none is open, closes only if one is. Safe to
+    apply every cycle, which also self-heals a wiped/edited DB mid-outage. Duration is
+    clamped at zero so a clock anomaly can never store a negative one."""
     if went_up:
         oid = open_outage(conn, kind)
         if oid is not None:
             row = conn.execute("SELECT start_ts FROM outages WHERE id=?", (oid,)).fetchone()
             conn.execute("UPDATE outages SET end_ts=?, duration_s=? WHERE id=?",
-                         (now, now - row[0], oid))
+                         (now, max(0, now - row[0]), oid))
     else:
         if open_outage(conn, kind) is None:
             default = "dns" if kind == "dns" else "unknown"
@@ -614,18 +687,28 @@ def record_transition(conn, now, kind, went_up, cause=None):
                          (now, cause or default, kind))
 
 
-def escalate_cause(conn, kind, cause):
-    """While a connectivity outage is open, widen its cause toward the most
-    severe seen."""
+def tally_cause(conn, kind, cause, dt):
+    """Attribute dt seconds of the OPEN outage to `cause` and keep the outage's headline
+    cause as the one with the MOST attributed time (ties go to the more severe). This
+    replaces most-severe-ever escalation, under which power-cycling the router for a
+    minute relabeled a two-hour ISP outage as 'local' - backwards for ISP evidence.
+    The full tally is kept in the JSON `causes` column for transparency."""
     if not cause:
         return
     oid = open_outage(conn, kind)
     if oid is None:
         return
-    row = conn.execute("SELECT cause FROM outages WHERE id=?", (oid,)).fetchone()
-    cur = row[0] if row else None
-    if CAUSE_SEVERITY.get(cause, 0) > CAUSE_SEVERITY.get(cur, 0):
-        conn.execute("UPDATE outages SET cause=? WHERE id=?", (cause, oid))
+    row = conn.execute("SELECT causes FROM outages WHERE id=?", (oid,)).fetchone()
+    try:
+        tally = json.loads(row[0]) if row and row[0] else {}
+        if not isinstance(tally, dict):
+            tally = {}
+    except ValueError:
+        tally = {}
+    tally[cause] = int(tally.get(cause, 0)) + int(dt)
+    dominant = max(tally.items(), key=lambda kv: (kv[1], CAUSE_SEVERITY.get(kv[0], 0)))[0]
+    conn.execute("UPDATE outages SET causes=?, cause=? WHERE id=?",
+                 (json.dumps(tally), dominant, oid))
 
 
 def trim_old_checks(conn, now, retention_days):
@@ -671,6 +754,7 @@ def main():
 
     conn = sqlite3.connect(DB_PATH, timeout=10)
     init_db(conn)
+    reconcile_pause_state(conn, _now())
     gw_ip = discover_gateway()
 
     meta_set(conn, "gateway", gw_ip or "")
@@ -682,6 +766,8 @@ def main():
 
     was_paused = False
     last_trim = float(meta_get(conn, "last_trim_ts", "0") or 0)
+    prev_wall = prev_boot = None   # wall-vs-monotonic baseline for clock-step detection
+    clock_warned = False
 
     while _running:
         cycle_start = time.monotonic()
@@ -708,10 +794,37 @@ def main():
             was_paused = False
             prev_ts = None
 
+        # --- clock sanity: a stepping clock corrupts the timeline if written through ---
+        boot_now = _mono_boot()
+        drift = ((now - prev_wall) - (boot_now - prev_boot)) if prev_wall is not None else 0.0
+        prev_wall, prev_boot = now, boot_now
+        if (prev_ts is not None and now <= prev_ts) or drift < -CLOCK_STEP_S:
+            # Clock went BACKWARD (NTP correcting a fast clock, manual change): writing now
+            # would overwrite or interleave with already-recorded history. Mark it once and
+            # idle until the clock passes the last written timestamp again.
+            if not clock_warned:
+                log_event(conn, now, "clockstep", str(int(drift)))
+                conn.commit()
+                print(f"[{datetime.now(timezone.utc).isoformat()}] clock stepped backward "
+                      f"({int(drift)}s); pausing writes until it catches up", flush=True)
+                clock_warned = True
+            _sleep_interval(cycle_start, interval)
+            continue
+        clock_warned = False
+        if drift > CLOCK_STEP_S and _HAS_BOOTTIME:
+            # Forward step (e.g. first NTP sync after booting with a stale clock). The
+            # monitor was running the whole time, so don't let the jump register as a
+            # no-data gap; record the integrity boundary instead.
+            log_event(conn, now, "clockstep", str(int(drift)))
+            print(f"[{datetime.now(timezone.utc).isoformat()}] clock stepped forward "
+                  f"{int(drift)}s", flush=True)
+            prev_ts = None
+
         # --- gap detection (reboot / long stall): record, never synthesize ---
-        # Threshold exceeds the worst-case probe time so a slow outage cycle is
-        # not mislabeled as a gap (which would mask the outage in availability).
-        if prev_ts is not None and (now - prev_ts) > gap_threshold(interval, len(targets)):
+        # Threshold exceeds the worst-case probe time AT THE LIVE response cutoff, so a
+        # slow fully-failing cycle is not mislabeled as a gap (which would reclassify
+        # the outage's downtime as no-data and mask it in availability).
+        if prev_ts is not None and (now - prev_ts) > gap_threshold(interval, len(targets), timeout_s):
             log_event(conn, now, "gap", str(now - prev_ts))
 
         # --- probes ---
@@ -731,13 +844,15 @@ def main():
         # the line is down, DNS fails too and is covered by the net outage, so
         # close any open DNS outage and record dns as unknown for this cycle.
         if up:
-            dns_ok = probe_dns(DNS_PROBE_HOST)
+            dns_ok = probe_dns()
         else:
             dns_ok = None
             record_transition(conn, now, "dns", went_up=True)
 
+        # OR IGNORE, never REPLACE: if a clock anomaly slips past the guards above, an
+        # already-recorded row must win - history is never silently overwritten.
         conn.execute(
-            "INSERT OR REPLACE INTO checks (ts, up, latency_ms, gw, dns, target) "
+            "INSERT OR IGNORE INTO checks (ts, up, latency_ms, gw, dns, target) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (now, 1 if up else 0, latency,
              (None if gw is None else (1 if gw else 0)),
@@ -748,9 +863,20 @@ def main():
         # --- connectivity (kind 'net') transitions ---
         # Alerts are captured here and SENT only after the commit below, so a notification is
         # never dispatched for a transition a crash/rollback would undo.
+        # The outage state is applied EVERY cycle (record_transition is idempotent), not just
+        # on flips: that self-heals the invariant "down => an open net outage exists" after a
+        # mid-outage reset or manual DB edit, which previously lost the rest of the outage.
         pending_alerts = []
-        if prev_up is not None and up != prev_up:
-            record_transition(conn, now, "net", went_up=up, cause=net_cause)
+        transitioned = prev_up is not None and up != prev_up
+        record_transition(conn, now, "net", went_up=up, cause=net_cause)
+        if not up:
+            # Attribute this down stretch to the cause observed THIS cycle; the outage's
+            # headline cause becomes the one that dominated. Clamped so a restart into an
+            # ongoing outage can't attribute the unmonitored span to one cause.
+            dt = (now - prev_ts) if prev_ts is not None else interval
+            dt = max(1, min(int(dt), int(gap_threshold(interval, len(targets), timeout_s))))
+            tally_cause(conn, "net", net_cause, dt)
+        if transitioned:
             print(f"[{datetime.now(timezone.utc).isoformat()}] "
                   f"{'RECOVERED' if up else 'OUTAGE'} cause={net_cause} latency={latency}", flush=True)
             # Recovery alert: the line just came back, so the network is available to send on.
@@ -762,10 +888,6 @@ def main():
                         "Connection restored",
                         f"Your connection has returned after being down for {_human_dur(oc[0])}. "
                         f"Cause: {CAUSE_PHRASE.get(oc[1] or 'unknown', 'an unknown cause')}."))
-        elif prev_up is None and not up:
-            record_transition(conn, now, "net", went_up=False, cause=net_cause)
-        elif not up:
-            escalate_cause(conn, "net", net_cause)     # ongoing outage: widen cause if worse
 
         # --- DNS (kind 'dns') transitions, only while the line is up. A DNS failure means sites
         # won't load on any device even though the line is up, so it is alertable (and deliverable,
@@ -773,17 +895,17 @@ def main():
         DNS_DOWN_MSG = ("Your connection is up but DNS lookups are failing, so sites won't load on "
                         "any device until it recovers.")
         if up:
-            if prev_dns is not None and dns_ok != prev_dns:
-                record_transition(conn, now, "dns", went_up=dns_ok, cause="dns")
+            dns_transitioned = (prev_dns is not None and dns_ok != prev_dns) \
+                or (prev_dns is None and not dns_ok)
+            # applied every cycle (idempotent): also closes/opens correctly after a
+            # restart or manual edit left the table out of sync with reality
+            record_transition(conn, now, "dns", went_up=dns_ok, cause="dns")
+            if dns_transitioned:
                 print(f"[{datetime.now(timezone.utc).isoformat()}] "
                       f"DNS {'OK' if dns_ok else 'FAILING'}", flush=True)
                 if alerts["dns"] and alerts["url"]:
                     pending_alerts.append(("DNS recovered", "Name resolution is working again.")
                                           if dns_ok else ("DNS failing", DNS_DOWN_MSG))
-            elif prev_dns is None and not dns_ok:
-                record_transition(conn, now, "dns", went_up=False, cause="dns")
-                if alerts["dns"] and alerts["url"]:
-                    pending_alerts.append(("DNS failing", DNS_DOWN_MSG))
 
         # --- hourly retention trim ---
         if now - last_trim >= 3600:

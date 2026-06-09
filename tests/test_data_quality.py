@@ -1,0 +1,222 @@
+"""Data-quality regression tests for outage detection (monitor.py) and reporting
+(dashboard.py). Pure stdlib; every test runs on an in-memory SQLite DB and never
+touches the network.
+
+Run from the repo root:  python -m unittest discover -s tests -v
+"""
+import json
+import os
+import sqlite3
+import sys
+import tempfile
+import time
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import dashboard
+import monitor
+
+
+def fresh_conn():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    monitor.init_db(conn)
+    return conn
+
+
+class GapThresholdTest(unittest.TestCase):
+    def test_budget_scales_with_live_response_cutoff(self):
+        """At a 3s cutoff a fully failing confirmed cycle runs ~75s+; the gap threshold
+        must stay above it or every failing cycle logs a phantom gap that reclassifies
+        the outage's downtime as no-data."""
+        n_targets, cutoff = 6, 3.0
+        worst_cycle = (n_targets * cutoff) * (1 + monitor.CONFIRM_RETRIES) \
+            + monitor.CONFIRM_RETRIES * monitor.RETRY_GAP \
+            + len(monitor.GATEWAY_PORTS) * monitor.GW_TIMEOUT
+        self.assertGreater(monitor.gap_threshold(5, n_targets, cutoff), worst_cycle)
+
+    def test_budget_scales_with_target_count(self):
+        self.assertGreater(monitor.gap_threshold(5, 16, 3.0), monitor.gap_threshold(5, 6, 3.0))
+
+
+class TransitionTest(unittest.TestCase):
+    def test_duration_clamped_at_zero(self):
+        """A clock anomaly must never store a negative outage duration."""
+        conn = fresh_conn()
+        monitor.record_transition(conn, 1000, "net", went_up=False, cause="isp")
+        monitor.record_transition(conn, 900, "net", went_up=True)
+        dur = conn.execute("SELECT duration_s FROM outages").fetchone()[0]
+        self.assertEqual(dur, 0)
+
+    def test_idempotent_self_heal_after_reset(self):
+        """Applying the down state every cycle reopens an outage a mid-outage DB reset
+        wiped, instead of losing the rest of the outage."""
+        conn = fresh_conn()
+        monitor.record_transition(conn, 1000, "net", went_up=False, cause="isp")
+        conn.execute("DELETE FROM outages")                      # the reset
+        monitor.record_transition(conn, 1010, "net", went_up=False, cause="isp")
+        rows = conn.execute("SELECT start_ts, end_ts FROM outages").fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["start_ts"], 1010)
+        self.assertIsNone(rows[0]["end_ts"])
+        # and applying it again does NOT open a second one
+        monitor.record_transition(conn, 1020, "net", went_up=False, cause="isp")
+        self.assertEqual(conn.execute("SELECT COUNT(*) c FROM outages").fetchone()["c"], 1)
+
+
+class CauseTallyTest(unittest.TestCase):
+    def test_dominant_cause_wins(self):
+        """A brief local blip inside a long ISP outage must not relabel it 'local'."""
+        conn = fresh_conn()
+        monitor.record_transition(conn, 1000, "net", went_up=False, cause="isp")
+        monitor.tally_cause(conn, "net", "isp", 60)
+        monitor.tally_cause(conn, "net", "isp", 60)
+        monitor.tally_cause(conn, "net", "local", 10)   # router power-cycled for a moment
+        row = conn.execute("SELECT cause, causes FROM outages").fetchone()
+        self.assertEqual(row["cause"], "isp")
+        self.assertEqual(json.loads(row["causes"]), {"isp": 120, "local": 10})
+
+    def test_cause_flips_when_local_dominates(self):
+        conn = fresh_conn()
+        monitor.record_transition(conn, 1000, "net", went_up=False, cause="isp")
+        monitor.tally_cause(conn, "net", "isp", 30)
+        monitor.tally_cause(conn, "net", "local", 300)
+        self.assertEqual(conn.execute("SELECT cause FROM outages").fetchone()["cause"], "local")
+
+
+class BuildRangeTest(unittest.TestCase):
+    def test_future_end_clamped(self):
+        """Unmonitored future time must not enter the availability denominator."""
+        conn = fresh_conn()
+        now = int(time.time())
+        for ts in range(now - 3600, now, 10):
+            conn.execute("INSERT INTO checks (ts, up, latency_ms) VALUES (?, 1, 20)", (ts,))
+        data = dashboard.build_range(conn, now - 3600, now + 86400)
+        self.assertLessEqual(data["end"], now)
+        self.assertLessEqual(data["summary"]["monitored_seconds"], 3600)
+
+    def test_boundary_zero_overlap_outage_not_counted(self):
+        """An outage ending exactly at the range edge belongs to the adjacent range."""
+        conn = fresh_conn()
+        now = int(time.time())
+        t0 = now - 600
+        conn.execute("INSERT INTO outages (start_ts, end_ts, duration_s, cause, kind) "
+                     "VALUES (?, ?, 100, 'isp', 'net')", (t0 - 100, t0))
+        after = dashboard.build_range(conn, t0, now)["summary"]
+        before = dashboard.build_range(conn, t0 - 300, t0)["summary"]
+        self.assertEqual(after["outage_count"], 0)
+        self.assertEqual(before["outage_count"], 1)
+
+    def test_gap_event_after_range_end_still_clips_in(self):
+        """Gap events are stamped at the gap's END; one landing after the window must
+        still contribute its in-window span (else that span counts as monitored-up)."""
+        conn = fresh_conn()
+        now = int(time.time())
+        start, end = now - 1000, now - 500
+        # monitor was off (end-50 .. end+50): event stamped at end+50, span 100s back
+        conn.execute("INSERT INTO events (ts, kind, detail) VALUES (?, 'gap', '100')",
+                     (end + 50,))
+        s = dashboard.build_range(conn, start, end)["summary"]
+        self.assertEqual(s["gap_seconds"], 50)
+        self.assertEqual(s["monitored_seconds"], 450)
+
+    def test_mttr_per_kind_and_gap_corrected(self):
+        conn = fresh_conn()
+        now = int(time.time())
+        start = now - 2000
+        o = "INSERT INTO outages (start_ts, end_ts, duration_s, cause, kind) VALUES (?,?,?,?,?)"
+        conn.execute(o, (now - 1900, now - 1800, 100, "isp", "net"))       # clean 100s
+        conn.execute(o, (now - 1000, now - 800, 200, "isp", "net"))        # 200s, 120s unmonitored
+        conn.execute("INSERT INTO events (ts, kind, detail) VALUES (?, 'gap', '120')",
+                     (now - 850,))                                          # span now-970..now-850
+        conn.execute(o, (now - 500, now - 460, 40, "dns", "dns"))          # DNS 40s
+        s = dashboard.build_range(conn, start, now)["summary"]
+        self.assertAlmostEqual(s["mttr_net_s"], 90.0)    # (100 + (200-120)) / 2
+        self.assertAlmostEqual(s["mttr_dns_s"], 40.0)
+        self.assertEqual(s["net_events"], 2)
+        self.assertEqual(s["dns_events"], 1)
+        self.assertEqual(s["longest_net_s"], 200)        # raw, matches the log rows
+        self.assertEqual(s["last_net_outage_start"], now - 1000)
+        self.assertEqual(s["last_outage_start"], now - 500)
+
+    def test_dns_counts_toward_downtime(self):
+        conn = fresh_conn()
+        now = int(time.time())
+        conn.execute("INSERT INTO outages (start_ts, end_ts, duration_s, cause, kind) "
+                     "VALUES (?, ?, 60, 'dns', 'dns')", (now - 300, now - 240))
+        s = dashboard.build_range(conn, now - 600, now)["summary"]
+        self.assertEqual(s["down_seconds"], 60)
+        self.assertEqual(s["dns_seconds"], 60)
+
+
+class LiveStreakTest(unittest.TestCase):
+    def test_streak_clamped_by_gap_event(self):
+        """'Current uptime' is a claim of continuous observation: it must not bridge a
+        span where the monitor wasn't running."""
+        conn = fresh_conn()
+        now = int(time.time())
+        for ts in range(now - 1000, now + 1, 10):
+            conn.execute("INSERT INTO checks (ts, up, latency_ms) VALUES (?, 1, 20)", (ts,))
+        conn.execute("INSERT INTO events (ts, kind, detail) VALUES (?, 'gap', '200')",
+                     (now - 300,))
+        live = dashboard.get_live(conn, now)
+        self.assertEqual(live["status"], "up")
+        self.assertLessEqual(live["streak_seconds"], 300)
+
+
+class PauseReconcileTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.orig_pause = monitor.PAUSE_FILE
+        monitor.PAUSE_FILE = os.path.join(self.tmp, "PAUSED")
+
+    def tearDown(self):
+        monitor.PAUSE_FILE = self.orig_pause
+
+    def test_dangling_pause_closed_at_startup(self):
+        """Unpause-while-down must not leave everything since counted as paused."""
+        conn = fresh_conn()
+        now = int(time.time())
+        monitor.log_event(conn, now - 5000, "pause")
+        monitor.reconcile_pause_state(conn, now)        # no PAUSE_FILE: not paused anymore
+        last = conn.execute("SELECT ts, kind FROM events ORDER BY ts DESC, id DESC").fetchone()
+        self.assertEqual(last["kind"], "resume")
+
+    def test_elapsed_timed_pause_resumes_at_expiry(self):
+        conn = fresh_conn()
+        now = int(time.time())
+        monitor.log_event(conn, now - 5000, "pause")
+        with open(monitor.PAUSE_FILE, "w") as f:
+            f.write(str(now - 100))                     # expired while the daemon was down
+        monitor.reconcile_pause_state(conn, now)
+        last = conn.execute("SELECT ts, kind FROM events ORDER BY id DESC").fetchone()
+        self.assertEqual(last["kind"], "resume")
+        self.assertEqual(last["ts"], now - 100)         # stamped at the true expiry
+        self.assertFalse(os.path.exists(monitor.PAUSE_FILE))
+
+    def test_active_pause_left_alone(self):
+        conn = fresh_conn()
+        now = int(time.time())
+        monitor.log_event(conn, now - 50, "pause")
+        with open(monitor.PAUSE_FILE, "w") as f:
+            f.write(str(now + 600))                     # still paused
+        monitor.reconcile_pause_state(conn, now)
+        last = conn.execute("SELECT kind FROM events ORDER BY id DESC").fetchone()
+        self.assertEqual(last["kind"], "pause")
+
+
+class FirstRecordTest(unittest.TestCase):
+    def test_all_time_anchors_to_oldest_record_not_oldest_check(self):
+        """Check rows are trimmed by retention while outages are kept forever; 'all
+        time' must not silently shrink to the retention window."""
+        conn = fresh_conn()
+        now = int(time.time())
+        conn.execute("INSERT INTO outages (start_ts, end_ts, duration_s, cause, kind) "
+                     "VALUES (?, ?, 60, 'isp', 'net')", (now - 900000, now - 899940))
+        conn.execute("INSERT INTO checks (ts, up, latency_ms) VALUES (?, 1, 20)", (now - 100,))
+        self.assertEqual(dashboard.first_record_ts(conn), now - 900000)
+
+
+if __name__ == "__main__":
+    unittest.main()

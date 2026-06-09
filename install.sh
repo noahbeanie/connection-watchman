@@ -129,7 +129,9 @@ else
     sudo tee /etc/systemd/system/uptime-$svc.service >/dev/null <<EOF
 [Unit]
 Description=$DESC
-After=network.target
+# time-sync.target: start after NTP is at least underway, so a boot with a stale clock
+# (no RTC battery) is less likely to log checks at wrong timestamps.
+After=network.target time-sync.target
 
 [Service]
 Type=simple

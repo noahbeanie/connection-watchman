@@ -11,38 +11,104 @@ interface Seg {
   t: number; end: number; up: number; total: number
   pct: number | null; avg: number | null; min: number | null; max: number | null
   paused?: boolean
+  downFrac: number   // fraction of the slice's MONITORED time inside an outage (0..1)
 }
 
-// Slice the range into ~target fixed-width TIME segments (a classic status-page strip), then
-// derive each slice's state from the checks in it AND the paused / no-data spans. Going by time
-// (not by bucket index) means a paused or no-data stretch shows as itself, instead of letting an
-// adjacent bucket's colour smear across the whole gap. Fewer segments on phones so bars stay tappable.
+type Span = { start: number; end: number }
+
+const mergeSpans = (spans: Span[]): Span[] => {
+  const iv = [...spans].sort((x, y) => x.start - y.start)
+  const out: Span[] = []
+  for (const sp of iv) {
+    const last = out[out.length - 1]
+    if (last && sp.start <= last.end) last.end = Math.max(last.end, sp.end)
+    else out.push({ ...sp })
+  }
+  return out
+}
+
+const subtractSpans = (base: Span[], cuts: Span[]): Span[] => {
+  let segs = base
+  for (const c of cuts) {
+    const nxt: Span[] = []
+    for (const sp of segs) {
+      if (c.end <= sp.start || c.start >= sp.end) { nxt.push(sp); continue }
+      if (sp.start < c.start) nxt.push({ start: sp.start, end: c.start })
+      if (c.end < sp.end) nxt.push({ start: c.end, end: sp.end })
+    }
+    segs = nxt
+  }
+  return segs
+}
+
+const overlapSec = (s: number, e: number, spans: { start: number; end: number }[]) =>
+  spans.reduce((a, g) => a + Math.max(0, Math.min(e, g.end) - Math.max(s, g.start)), 0)
+
+// Exact downtime spans (connectivity + DNS outages, no-data spans cut out), clipped to the
+// range. During a real outage failing checks are MUCH sparser than healthy ones (each takes
+// the full retry burst), so colouring by check counts alone understates downtime - these
+// intervals are the truth the strip shades by. Check counts stay in as a floor because the
+// outage list is capped at 200 server-side for very long ranges.
+function downSpansOf(d: Pick<RangeData, "outages" | "gaps" | "start" | "end" | "now">): Span[] {
+  const clip = (s: number, e: number): Span | null => {
+    const a = Math.max(s, d.start), b = Math.min(e, d.end)
+    return b > a ? { start: a, end: b } : null
+  }
+  const down = d.outages
+    .filter((o) => o.kind === "net" || o.kind === "dns")
+    .map((o) => clip(o.start, o.end ?? d.now))
+    .filter((x): x is Span => x != null)
+  const cuts = mergeSpans(d.gaps.map((g) => ({ start: g.start, end: g.end })))
+  return subtractSpans(mergeSpans(down), cuts)
+}
+
+// Slice the range into fixed-width TIME segments (a classic status-page strip), then derive each
+// slice's state from the checks in it AND the paused / no-data spans. Going by time (not by bucket
+// index) means a paused or no-data stretch shows as itself, instead of letting an adjacent bucket's
+// colour smear across the whole gap. Fewer segments on phones so bars stay tappable.
+//
+// Each segment is an integer number of WHOLE buckets wide and its edges are snapped to the bucket
+// grid (server bucket keys are multiples of d.bucket), so every bucket belongs to exactly ONE
+// segment. If slices were offset from the grid, a bucket straddling a slice edge would be counted in
+// BOTH neighbours - painting a slice "partial" from a failure that actually sits in the adjacent
+// minute, while the hover drill-down (which re-queries the exact slice window) shows all-green.
+// Grid alignment keeps the strip and the drill-down breakdown consistent.
 function toSegments(d: RangeData, target: number): Seg[] {
   const span = Math.max(1, d.end - d.start)
-  const n = Math.max(1, Math.min(target, Math.round(span / d.bucket)))
-  const slice = span / n
+  const per = Math.max(1, Math.ceil(Math.round(span / d.bucket) / target)) // whole buckets per segment
+  const slice = per * d.bucket
+  const gridStart = Math.floor(d.start / d.bucket) * d.bucket              // align edges to the bucket grid
+  const n = Math.max(1, Math.ceil((d.end - gridStart) / slice))
   const pausedSpans = d.gaps.filter((g) => g.kind === "paused")
-  const ov = (s: number, e: number, spans: { start: number; end: number }[]) =>
-    spans.reduce((a, g) => a + Math.max(0, Math.min(e, g.end) - Math.max(s, g.start)), 0)
+  const downSpans = downSpansOf(d)
   const out: Seg[] = []
   for (let i = 0; i < n; i++) {
-    const s = d.start + i * slice
-    const e = i === n - 1 ? d.end : s + slice
-    const bs = d.buckets.filter((b) => b.t < e && b.t + d.bucket > s)
+    const s = gridStart + i * slice
+    const wEnd = s + slice                      // grid-aligned window used to assign buckets
+    const e = i === n - 1 ? d.end : wEnd         // clamp only the shown end of the last segment to the range
+    const bs = d.buckets.filter((b) => b.t >= s && b.t < wEnd)
     const up = bs.reduce((a, b) => a + b.up, 0)
     const total = bs.reduce((a, b) => a + b.total, 0)
     const avgs = bs.map((b) => b.avg).filter((x): x is number => x != null)
     const mins = bs.map((b) => b.min).filter((x): x is number => x != null)
     const maxs = bs.map((b) => b.max).filter((x): x is number => x != null)
+    // Down fraction from the EXACT outage intervals over the slice's monitored time,
+    // with the check counts as a floor (capped outage list on very long ranges).
+    const gapOv = overlapSec(s, e, d.gaps)
+    const downOv = overlapSec(s, e, downSpans)
+    const effective = Math.max(0, e - s - gapOv)
+    const intervalFrac = effective > 0 ? Math.min(1, downOv / effective) : 0
+    const checkFrac = total > 0 ? (total - up) / total : 0
     out.push({
       t: s, end: e, up, total,
       pct: total ? (up / total) * 100 : null,
       avg: avgs.length ? Math.round((avgs.reduce((a, c) => a + c, 0) / avgs.length) * 10) / 10 : null,
       min: mins.length ? Math.min(...mins) : null,
       max: maxs.length ? Math.max(...maxs) : null,
-      // No checks here, and the slot is mostly inside a paused span -> "paused" (its own colour).
-      // Any other check-less slot stays "no data" grey.
-      paused: total === 0 && ov(s, e, pausedSpans) >= (e - s) * 0.5,
+      downFrac: Math.max(intervalFrac, checkFrac),
+      // No checks, no outage, and the slot is mostly inside a paused span -> "paused"
+      // (its own colour). Any other check-less, outage-less slot stays "no data" grey.
+      paused: total === 0 && downOv <= 0 && overlapSec(s, e, pausedSpans) >= (e - s) * 0.5,
     })
   }
   return out
@@ -50,12 +116,11 @@ function toSegments(d: RangeData, target: number): Seg[] {
 
 function segColor(s: Seg): string {
   if (s.paused) return "var(--paused)" // monitoring was paused: not an outage
-  if (s.total === 0 || s.pct == null) return "var(--gap-band)" // no data
-  if (s.up === s.total) return "var(--up)" // every check passed
-  if (s.up === 0) return "var(--down)" // every check failed
-  // Partially down: the more checks failed, the redder (amber -> red by down fraction).
-  const downFrac = (s.total - s.up) / s.total
-  return `color-mix(in oklab, var(--down) ${Math.round(downFrac * 100)}%, var(--amber))`
+  if (s.total === 0 && s.downFrac <= 0) return "var(--gap-band)" // no checks, no outage: no data
+  if (s.downFrac <= 0) return "var(--up)" // fully online
+  if (s.downFrac >= 0.999) return "var(--down)" // down the whole (monitored) slice
+  // Partially down: the larger the down share of the slice, the redder (amber -> red).
+  return `color-mix(in oklab, var(--down) ${Math.round(s.downFrac * 100)}%, var(--amber))`
 }
 
 export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
@@ -82,9 +147,11 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
   const activeIdx = hovSeg ? hovSeg.idx : extIdx
   const activeSeg = hovSeg ? hovSeg.seg : extIdx >= 0 ? segs[extIdx] : null
   const interactive = !!hovSeg
-  const partial = !!activeSeg && activeSeg.total > 0 && activeSeg.up > 0 && activeSeg.up < activeSeg.total
+  const partial = !!activeSeg && activeSeg.downFrac > 0 && activeSeg.downFrac < 0.999
 
-  // Fetch a finer breakdown for a partial active segment (cached per segment).
+  // Fetch a finer breakdown for a partial active segment (cached per segment). Bars are
+  // judged by the SAME rule as the strip (failed checks OR exact outage overlap), so the
+  // drill-down can never contradict the colour that invited the hover.
   useEffect(() => {
     if (!activeSeg || !partial || !fetchRange) { setMini(null); return }
     const key = activeSeg.t
@@ -94,7 +161,11 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
     let alive = true
     fetchRange(activeSeg.t, activeSeg.end)
       .then((rd) => {
-        const bars = rd.buckets.map((b) => ({ t: b.t + rd.bucket / 2, ok: b.total > 0 && b.up === b.total }))
+        const downs = downSpansOf(rd)
+        const bars = rd.buckets.map((b) => ({
+          t: b.t + rd.bucket / 2,
+          ok: !(b.total > 0 && b.up < b.total) && overlapSec(b.t, b.t + rd.bucket, downs) <= 0,
+        }))
         miniCache.current.set(key, bars)
         if (alive) setMini({ key, bars })
       })
@@ -149,12 +220,14 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
   const info = activeSeg ? (() => {
     const sg = activeSeg
     const paused = !!sg.paused
-    const noData = !paused && (sg.total === 0 || sg.pct == null)
-    const down = !paused && !noData && sg.up < sg.total
+    const down = !paused && sg.downFrac > 0
+    const noData = !paused && !down && sg.total === 0
+    // DNS outages count as downtime, so they belong in the cause line too (labeled "DNS").
     const causes = down
       ? [...new Set(
           data.outages
-            .filter((o) => o.kind !== "dns" && o.start < sg.end && (o.end == null || o.end >= sg.t))
+            .filter((o) => (o.kind === "net" || o.kind === "dns")
+              && o.start < sg.end && (o.end == null || o.end >= sg.t))
             .map((o) => o.cause),
         )]
       : []
@@ -217,7 +290,11 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
             )}
             {partial ? (
               <div className="mt-1.5">
-                {mini && mini.key === activeSeg.t ? (
+                {mini && mini.key === activeSeg.t && mini.bars.length === 0 ? (
+                  <div className="flex h-7 items-center text-[0.7rem] text-muted-foreground/60">
+                    No checks landed in this slice; shaded from the exact outage record.
+                  </div>
+                ) : mini && mini.key === activeSeg.t ? (
                   <>
                     <div className="flex h-7 items-stretch gap-[2px]">
                       {mini.bars.map((bar, j) => (

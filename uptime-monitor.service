@@ -5,7 +5,9 @@
 #   sudo systemctl daemon-reload && sudo systemctl enable --now uptime-monitor
 [Unit]
 Description=Connection Watchman internet monitor (logging daemon)
-After=network.target
+# time-sync.target: start after NTP is at least underway, so a boot with a stale clock
+# (no RTC battery) is less likely to log checks at wrong timestamps.
+After=network.target time-sync.target
 
 [Service]
 Type=simple
