@@ -489,7 +489,7 @@ def alert_cfg(conn):
     """Notification settings from meta. url='' means alerts are off."""
     return {
         "url": meta_get(conn, "cfg_alert_url", "") or "",
-        "type": meta_get(conn, "cfg_alert_type", "ntfy") or "ntfy",
+        "type": meta_get(conn, "cfg_alert_type", "discord") or "discord",
         "recovery": (meta_get(conn, "cfg_alert_recovery", "1") or "1") == "1",
         "degraded": (meta_get(conn, "cfg_alert_degraded", "0") or "0") == "1",
     }
@@ -498,8 +498,7 @@ def alert_cfg(conn):
 def send_alert(url, atype, title, message):
     """POST a notification to the configured channel. Pure stdlib, best-effort: any
     failure is swallowed so alerting can never disturb the monitor loop. Returns True on
-    a 2xx response. Supports ntfy (plain text + Title header), Discord webhooks, and a
-    generic JSON webhook."""
+    a 2xx response. Supports a Discord webhook and a generic JSON webhook."""
     if not url:
         return False
     import urllib.request
@@ -509,14 +508,12 @@ def send_alert(url, atype, title, message):
     try:
         if atype == "discord":
             body = json.dumps({"content": f"**{title}**\n{message}"}).encode("utf-8")
-            headers = {"Content-Type": "application/json", "User-Agent": ua}
-        elif atype == "webhook":
+        else:  # generic JSON webhook
             body = json.dumps({"title": title, "message": message}).encode("utf-8")
-            headers = {"Content-Type": "application/json", "User-Agent": ua}
-        else:  # ntfy (default): plain-text body, title in a header
-            body = message.encode("utf-8")
-            headers = {"Title": title, "Content-Type": "text/plain; charset=utf-8", "User-Agent": ua}
-        req = urllib.request.Request(url, data=body, headers=headers)
+        req = urllib.request.Request(
+            url, data=body,
+            headers={"Content-Type": "application/json", "User-Agent": ua},
+        )
         with urllib.request.urlopen(req, timeout=6) as resp:
             return 200 <= getattr(resp, "status", 200) < 300
     except Exception as e:
@@ -755,9 +752,9 @@ def main():
                 oc = last_closed_net_outage(conn)   # the outage record_transition just closed
                 if oc is not None:
                     pending_alerts.append((
-                        "Internet restored",
-                        f"Your internet is back online after {_human_dur(oc[0])} down "
-                        f"({CAUSE_PHRASE.get(oc[1] or 'unknown', 'an unknown cause')})."))
+                        "Connection restored",
+                        f"Your connection has returned after being down for {_human_dur(oc[0])}. "
+                        f"Cause: {CAUSE_PHRASE.get(oc[1] or 'unknown', 'an unknown cause')}."))
         elif prev_up is None and not up:
             record_transition(conn, now, "net", went_up=False, cause=net_cause)
         elif not up:

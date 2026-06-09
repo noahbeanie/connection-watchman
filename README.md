@@ -134,25 +134,18 @@ dashboard, never counted as downtime).
 
 ## Notifications (optional)
 
-By default the dashboard just logs. Turn on alerts under **Data & tools -> Alerts** to be
-told when things change. Pick a channel and paste its URL:
+By default the dashboard just logs. Under **Data & tools -> Notify me when my connection
+returns**, add a webhook to get a ping when the internet comes back after an outage, with how
+long it was down and the cause. A recovery alert is always deliverable, because the connection
+is back by the time it sends. (An alert cannot be delivered *while* the internet is actually
+down, which is why there is no "you are down right now" alert from a single box.)
 
-- **ntfy** (free, no account): install the ntfy app, pick any topic name, and use
-  `https://ntfy.sh/your-topic`.
-- **Discord**: a channel webhook URL.
-- **Webhook**: any endpoint; it receives `{"title", "message"}` as JSON.
+- **Discord**: a channel webhook URL (Server Settings -> Integrations -> Webhooks).
+- **Webhook**: any endpoint; it receives a JSON POST `{"title", "message"}`.
 
-Two alert types, each independently toggleable:
-
-- **Outage recovery** (on by default): sent when the internet comes back, with the outage's
-  duration and cause. A recovery alert is always deliverable, because the connection is back
-  by the time it sends. (An alert cannot be delivered *while* the internet is actually down,
-  which is why there is no "you are down right now" alert from a single box.)
-- **Slow connection** (off by default): sent when latency stays above your slow threshold for
-  several checks in a row, and again when it returns to normal.
-
-Use **Test** to fire a sample notification and confirm the channel works. Everything runs on
-the Python standard library, so there is still nothing to `pip install`.
+Use **Test** to send a sample to your channel (point a generic webhook at a receiver like
+webhook.site to see it). Everything runs on the Python standard library, so there is still
+nothing to `pip install`.
 
 ## Custom targets (optional)
 

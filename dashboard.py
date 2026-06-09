@@ -55,7 +55,7 @@ CFG_DEFAULT = {"interval": INTERVAL, "retention_days": RETENTION_DAYS,
                "outage_retention_days": OUTAGE_RETENTION_DAYS, "degraded_ms": DEGRADED_MS,
                "brownout_ms": BROWNOUT_MS, "timeout_ms": 1000}
 
-ALERT_TYPES = ("ntfy", "discord", "webhook")
+ALERT_TYPES = ("discord", "webhook")
 # Host label for a custom target: a DNS hostname or IPv4 (no schemes, paths, or spaces).
 # Enforces DNS limits (total <= 253, each label <= 63, no leading/trailing hyphen) so an
 # over-long label can never reach the monitor's socket layer and raise UnicodeError there.
@@ -465,7 +465,7 @@ def build_meta(conn):
         "resolvers": resolvers,
         "dns_host": dns_host,
         "alerts": {
-            "type": m("cfg_alert_type", "ntfy"),
+            "type": m("cfg_alert_type", "discord"),
             "url": m("cfg_alert_url", "") or "",
             "recovery": (m("cfg_alert_recovery", "1") or "1") == "1",
             "degraded": (m("cfg_alert_degraded", "0") or "0") == "1",

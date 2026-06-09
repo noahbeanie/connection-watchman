@@ -3,57 +3,52 @@ import { toast } from "sonner"
 import { Bell, Send } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Switch } from "@/components/ui/switch"
 import type { AlertConfig } from "@/lib/types"
 
 const post = (p: string, body: unknown) =>
   fetch(p, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
 
 const TYPES = [
-  { v: "ntfy", label: "ntfy" },
   { v: "discord", label: "Discord" },
   { v: "webhook", label: "Webhook" },
 ]
 const PLACEHOLDER: Record<string, string> = {
-  ntfy: "https://ntfy.sh/your-topic",
   discord: "https://discord.com/api/webhooks/...",
   webhook: "https://example.com/hook",
 }
 
-// Notification settings. Channel-agnostic: ntfy (free, no account), a Discord webhook, or any
-// generic JSON webhook. The monitor sends recovery alerts (deliverable, since the line is back)
-// and, optionally, sustained "slow connection" alerts.
+// Recovery notifications: ping a Discord channel webhook (or any generic JSON webhook) when the
+// connection comes back after an outage. A recovery alert is always deliverable, because the line
+// is back by the time it sends.
 export function AlertSettings({ alerts, onSaved }: { alerts: AlertConfig; onSaved: () => void }) {
-  const [type, setType] = useState(alerts.type || "ntfy")
+  const [type, setType] = useState(alerts.type === "webhook" ? "webhook" : "discord")
   const [url, setUrl] = useState(alerts.url || "")
-  const [recovery, setRecovery] = useState(alerts.recovery)
-  const [degraded, setDegraded] = useState(alerts.degraded)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
 
-  // Re-sync if the server values change underneath us (another tab, a poll refresh).
   useEffect(() => {
-    setType(alerts.type || "ntfy"); setUrl(alerts.url || "")
-    setRecovery(alerts.recovery); setDegraded(alerts.degraded)
-  }, [alerts.type, alerts.url, alerts.recovery, alerts.degraded])
+    setType(alerts.type === "webhook" ? "webhook" : "discord")
+    setUrl(alerts.url || "")
+  }, [alerts.type, alerts.url])
 
-  const persist = () => post("/api/alerts", { type, url: url.trim(), recovery, degraded })
+  // Recovery is the only alert now, so it's always on when a URL is set; degraded/brownout off.
+  const persist = () => post("/api/alerts", { type, url: url.trim(), recovery: true, degraded: false })
 
   const save = async () => {
     setSaving(true)
     const res = await persist()
     setSaving(false)
-    if (res.ok) { toast.success(url.trim() ? "Alerts saved" : "Alerts turned off"); onSaved() }
-    else toast.error("Could not save alerts: " + (await res.text()))
+    if (res.ok) { toast.success(url.trim() ? "Notifications saved" : "Notifications turned off"); onSaved() }
+    else toast.error("Could not save: " + (await res.text()))
   }
   const test = async () => {
-    if (!url.trim()) { toast.error("Add a notification URL first"); return }
+    if (!url.trim()) { toast.error("Add a webhook URL first"); return }
     setTesting(true)
     await persist()                        // save first so the test uses the current URL
     const res = await post("/api/alert/test", {})
     setTesting(false)
     const body = await res.json().catch(() => ({}))
-    if (res.ok && body.ok) { toast.success("Test alert sent. Check your device."); onSaved() }
+    if (res.ok && body.ok) { toast.success("Test sent. Check your channel.") }
     else toast.error("Test failed" + (body.error ? ": " + body.error : ""))
   }
 
@@ -61,7 +56,7 @@ export function AlertSettings({ alerts, onSaved }: { alerts: AlertConfig; onSave
     <div className="space-y-2.5 text-xs">
       <div className="flex items-center gap-2">
         <Bell className="size-3.5 text-muted-foreground" />
-        <span className="font-medium text-foreground">Notify me when the connection changes</span>
+        <span className="font-medium text-foreground">Notify me when my connection returns</span>
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <select
@@ -78,26 +73,18 @@ export function AlertSettings({ alerts, onSaved }: { alerts: AlertConfig; onSave
           className="h-8 min-w-[11rem] flex-1 font-mono text-xs"
         />
       </div>
-      <label className="flex cursor-pointer items-center justify-between gap-3 py-0.5">
-        <span className="text-muted-foreground">Outage recovery (back online)</span>
-        <Switch checked={recovery} onCheckedChange={(v) => setRecovery(!!v)} />
-      </label>
-      <label className="flex cursor-pointer items-center justify-between gap-3 py-0.5">
-        <span className="text-muted-foreground">Brownout (connection up but very slow)</span>
-        <Switch checked={degraded} onCheckedChange={(v) => setDegraded(!!v)} />
-      </label>
       <div className="flex gap-2 pt-0.5">
         <Button size="sm" variant="secondary" className="flex-1" disabled={saving} onClick={save}>
-          {saving ? "Saving..." : "Save alerts"}
+          {saving ? "Saving..." : "Save"}
         </Button>
         <Button size="sm" variant="outline" disabled={testing || !url.trim()} onClick={test}>
           <Send className="size-3.5" />{testing ? "Sending" : "Test"}
         </Button>
       </div>
       <p className="text-[0.7rem] leading-relaxed text-muted-foreground/70">
-        Recovery alerts fire when the internet comes back (an alert can't be delivered while it's actually down).
-        ntfy is free and needs no account: install the ntfy app, pick any topic name, and use
-        {" "}<span className="font-mono">https://ntfy.sh/your-topic</span>.
+        {type === "discord"
+          ? "Paste a Discord channel webhook URL (Server Settings -> Integrations -> Webhooks). Test sends a sample message to that channel."
+          : "Any endpoint; it receives a JSON POST { \"title\", \"message\" }. To try it, point it at a receiver like webhook.site and hit Test."}
       </p>
     </div>
   )
