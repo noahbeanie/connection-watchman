@@ -1,8 +1,9 @@
+import type { CSSProperties } from "react"
 import { Badge } from "@/components/ui/badge"
 import type { Live, Meta } from "@/lib/types"
 
-// Quiet status chip: ambient chrome, not a call to action - sized like a label, no
-// hover glow, with a gentle pulse on the dot (suppressed under prefers-reduced-motion).
+// Quiet status chip: ambient chrome, not a call to action. The dot is a status LED
+// that softly breathes while online (suppressed under prefers-reduced-motion).
 export function StatusBadge({ live, meta }: { live: Live | null; meta: Meta | null }) {
   let state: string = live?.status ?? "nodata"
   let text = "…"
@@ -16,19 +17,17 @@ export function StatusBadge({ live, meta }: { live: Live | null; meta: Meta | nu
   return (
     <Badge
       variant="outline"
-      className="h-auto shrink-0 cursor-default gap-1.5 py-1 pl-2.5 pr-3 text-sm font-semibold sm:gap-2 sm:py-1.5 sm:pl-3 sm:pr-3.5 sm:text-base"
+      className="h-auto shrink-0 cursor-default gap-2 py-1 pl-2.5 pr-3 text-sm font-semibold sm:py-1.5 sm:pl-3 sm:pr-3.5"
       style={{
-        background: `color-mix(in oklab, ${c} 12%, var(--card))`,
+        background: `color-mix(in oklab, ${c} 10%, transparent)`,
         color: c,
-        borderColor: `color-mix(in oklab, ${c} 32%, var(--border))`,
+        borderColor: `color-mix(in oklab, ${c} 30%, var(--border))`,
       }}
     >
-      <span className="relative flex size-2.5">
-        {state === "up" && (
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full opacity-60" style={{ background: c }} />
-        )}
-        <span className="relative inline-flex size-2.5 rounded-full" style={{ background: c }} />
-      </span>
+      <span
+        className={`relative inline-flex size-2 rounded-full${state === "up" ? " led-pulse" : ""}`}
+        style={{ background: c, "--led-c": c } as CSSProperties}
+      />
       {text}
     </Badge>
   )

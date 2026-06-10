@@ -268,7 +268,7 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
               onFocus={() => openSeg(s, i)} onBlur={scheduleClose}
               aria-label={`${fmtTime(s.t, wd)}: ${pctText(s.pct)} uptime`}
               className={`relative h-full min-w-[2px] flex-1 rounded-[3px] outline-none transition focus-visible:ring-2 focus-visible:ring-ring ${hot ? "z-10 brightness-125 ring-2 ring-inset ring-white/70" : "opacity-90 hover:opacity-100 hover:brightness-110"}`}
-              style={{ background: c }}
+              style={{ background: `linear-gradient(to bottom, color-mix(in oklab, ${c} 88%, white), ${c} 55%)` }}
             />
           )
         })}
@@ -277,7 +277,7 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
         createPortal(
           <div
             role="tooltip"
-            className={`fixed z-50 w-60 max-w-[calc(100vw-1.5rem)] -translate-x-1/2 -translate-y-full rounded-lg border bg-popover px-3 py-2 text-xs leading-snug text-popover-foreground shadow-xl ${interactive ? "" : "pointer-events-none"}`}
+            className={`tip-card fixed z-50 w-60 max-w-[calc(100vw-1.5rem)] -translate-x-1/2 -translate-y-full px-3 py-2 text-xs leading-snug text-popover-foreground ${interactive ? "" : "pointer-events-none"}`}
             style={{ left: pos.x, top: pos.y + 4 }}
             onMouseEnter={cancelClose}
             onMouseLeave={scheduleClose}

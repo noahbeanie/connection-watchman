@@ -45,7 +45,7 @@ export function AvailabilityGauge({ pct, presetId }: { pct: number | null; prese
       <div
         className="pointer-events-none absolute inset-0 rounded-full"
         style={{
-          background: `radial-gradient(circle at 50% 50%, transparent 58%, color-mix(in oklab, ${color} 20%, transparent) 74%, transparent 88%)`,
+          background: `radial-gradient(circle at 50% 50%, transparent 58%, color-mix(in oklab, ${color} 14%, transparent) 74%, transparent 88%)`,
           filter: "blur(7px)",
           opacity: frac > 0 ? 1 : 0,
         }}
@@ -71,22 +71,26 @@ export function AvailabilityGauge({ pct, presetId }: { pct: number | null; prese
             <feGaussianBlur stdDeviation="0.45" />
           </filter>
         </defs>
+        {/* precision tick ring: 60 hairline marks just outside the tube */}
+        <circle cx="50" cy="50" r={46.5} fill="none" strokeWidth="2.5"
+          strokeDasharray={`0.5 ${((2 * Math.PI * 46.5) / 60 - 0.5).toFixed(3)}`}
+          style={{ stroke: "color-mix(in oklab, var(--foreground) 8%, transparent)" }} />
         {/* unlit glass tube (the remainder of the ring) */}
         <circle cx="50" cy="50" r={R} fill="none" strokeWidth="7" strokeLinecap="round"
           style={{ stroke: `color-mix(in oklab, ${color} 12%, transparent)` }} />
         {/* wide soft bloom around the lit tube */}
-        <circle cx="50" cy="50" r={R} fill="none" strokeWidth="8" strokeLinecap="round"
+        <circle cx="50" cy="50" r={R} fill="none" strokeWidth="8" strokeLinecap="round" className="gauge-arc"
           strokeDasharray={C} strokeDashoffset={offset} filter="url(#neonBloom)"
           style={{ stroke: color, opacity: 0.3 }} />
         {/* tight inner glow */}
-        <circle cx="50" cy="50" r={R} fill="none" strokeWidth="7" strokeLinecap="round"
+        <circle cx="50" cy="50" r={R} fill="none" strokeWidth="7" strokeLinecap="round" className="gauge-arc"
           strokeDasharray={C} strokeDashoffset={offset} filter="url(#neonGlow)"
           style={{ stroke: color, opacity: 0.95 }} />
         {/* crisp lit tube */}
-        <circle cx="50" cy="50" r={R} fill="none" strokeWidth="7" strokeLinecap="round"
+        <circle cx="50" cy="50" r={R} fill="none" strokeWidth="7" strokeLinecap="round" className="gauge-arc"
           strokeDasharray={C} strokeDashoffset={offset} style={{ stroke: color }} />
         {/* hot near-white filament down the centre of the tube */}
-        <circle cx="50" cy="50" r={R} fill="none" strokeWidth="2.2" strokeLinecap="round"
+        <circle cx="50" cy="50" r={R} fill="none" strokeWidth="2.2" strokeLinecap="round" className="gauge-arc"
           strokeDasharray={C} strokeDashoffset={offset} filter="url(#neonCore)"
           style={{ stroke: core }} />
       </svg>
@@ -101,13 +105,13 @@ export function AvailabilityGauge({ pct, presetId }: { pct: number | null; prese
           </div>
           {grade && (
             <div
-              className="mt-1 text-xs font-semibold uppercase tracking-wider"
-              style={{ color: grade.color }}
+              className="mt-1.5 rounded-full px-2 py-0.5 text-xs font-semibold uppercase tracking-wider"
+              style={{ color: grade.color, background: `color-mix(in oklab, ${grade.color} 12%, transparent)` }}
             >
               {grade.label}
             </div>
           )}
-          <div className="mt-1 text-xs font-medium text-foreground">Uptime · {rangeWord(presetId)}</div>
+          <div className="mt-1.5 text-xs font-medium text-muted-foreground">Uptime · {rangeWord(presetId)}</div>
         </div>
       </div>
     </div>

@@ -65,7 +65,7 @@ export function CauseLegend() {
         createPortal(
           <div
             role="tooltip"
-            className="pointer-events-none fixed z-50 w-64 max-w-[calc(100vw-1.5rem)] -translate-x-1/2 -translate-y-full rounded-lg border bg-popover p-3 text-xs leading-snug text-popover-foreground shadow-xl"
+            className="tip-card pointer-events-none fixed z-50 w-64 max-w-[calc(100vw-1.5rem)] -translate-x-1/2 -translate-y-full p-3 text-xs leading-snug text-popover-foreground"
             style={{ left: tip.x, top: tip.y - 8 }}
           >
             {tip.desc}

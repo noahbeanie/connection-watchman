@@ -2,6 +2,7 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
 @import "@fontsource-variable/space-grotesk";
 
 @custom-variant dark (&:is(.dark *));
@@ -9,6 +10,7 @@
 @theme inline {
     --font-heading: var(--font-sans);
     --font-sans: 'Geist Variable', sans-serif;
+    --font-mono: 'Geist Mono Variable', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
     --color-chart-5: var(--chart-5);
     --color-chart-4: var(--chart-4);
     --color-chart-3: var(--chart-3);
@@ -43,34 +45,37 @@
 
 /* The dashboard is dark-only (html carries class="dark" for variant matching), so the
    theme tokens live on :root directly - no parallel light palette to drift out of sync.
-   The printable report styles itself explicitly (zinc-on-white) and ignores these. */
+   The printable report styles itself explicitly (zinc-on-white) and ignores these.
+
+   Palette: cold-cast neutrals (a whisper of blue, hue ~235) with a single "signal cyan"
+   interactive accent. Green stays reserved for health, red for failure, indigo for paused. */
 :root {
     --radius: 0.625rem;
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.62 0.17 256);
-    --primary-foreground: oklch(0.98 0.01 256);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
+    --background: oklch(0.135 0.008 235);
+    --foreground: oklch(0.985 0.003 235);
+    --card: oklch(0.19 0.01 235);
+    --card-foreground: oklch(0.985 0.003 235);
+    --popover: oklch(0.215 0.012 235);
+    --popover-foreground: oklch(0.985 0.003 235);
+    --primary: oklch(0.78 0.117 215);
+    --primary-foreground: oklch(0.16 0.02 235);
+    --secondary: oklch(0.26 0.012 235);
+    --secondary-foreground: oklch(0.985 0.003 235);
+    --muted: oklch(0.26 0.012 235);
+    --muted-foreground: oklch(0.72 0.015 235);
+    --accent: oklch(0.26 0.012 235);
+    --accent-foreground: oklch(0.985 0.003 235);
     --destructive: oklch(0.704 0.191 22.216);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.62 0.17 256);
+    --border: oklch(0.93 0.02 235 / 11%);
+    --input: oklch(0.93 0.02 235 / 15%);
+    --ring: oklch(0.78 0.117 215);
 
     /* Semantic status palette */
     --up: oklch(0.74 0.16 152);
     --up-band: oklch(0.72 0.16 152 / 0.5);
     --down: oklch(0.68 0.21 22);
     --down-band: oklch(0.64 0.22 22 / 0.95);
-    --gap-band: oklch(0.72 0.02 260 / 0.4);
+    --gap-band: oklch(0.72 0.015 235 / 0.4);
     --paused: oklch(0.6 0.1 265);
     --lat-line: oklch(0.9 0.1 210);
     --amber: oklch(0.84 0.14 92);
@@ -89,13 +94,62 @@
     }
   body {
     @apply bg-background text-foreground;
-    background-image: radial-gradient(1100px 520px at 50% -10%, color-mix(in oklab, var(--primary) 10%, transparent), transparent 62%);
+    /* Ambient depth: a cyan wash from the top (where the data lives) and a faint green
+       answer from the bottom corner. Fixed so panels scroll through the light. */
+    background-image:
+      radial-gradient(1100px 520px at 50% -10%, color-mix(in oklab, var(--primary) 9%, transparent), transparent 62%),
+      radial-gradient(900px 640px at 108% 105%, color-mix(in oklab, var(--up) 5%, transparent), transparent 60%);
     background-attachment: fixed;
     background-repeat: no-repeat;
     }
+  /* Engineering-paper dot grid, masked so it lives near the top and dissolves before it
+     can compete with content. Sits between the body wash and the panels. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background-image: radial-gradient(color-mix(in oklab, var(--foreground) 5%, transparent) 1px, transparent 1px);
+    background-size: 26px 26px;
+    mask-image: radial-gradient(ellipse 120% 80% at 50% -10%, black 25%, transparent 72%);
+    -webkit-mask-image: radial-gradient(ellipse 120% 80% at 50% -10%, black 25%, transparent 72%);
+    }
   html {
     @apply font-sans;
+    scrollbar-color: color-mix(in oklab, var(--foreground) 16%, transparent) transparent;
     }
+  ::selection {
+    background: color-mix(in oklab, var(--primary) 32%, transparent);
+    color: var(--foreground);
+    }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: color-mix(in oklab, var(--foreground) 14%, transparent);
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+    }
+  ::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in oklab, var(--foreground) 24%, transparent);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+    }
+}
+
+/* Shared chrome for every floating surface (portal tooltips + popovers): slightly
+   translucent popover with a frosted edge, a 1px top sheen, and a real drop shadow.
+   Layout (width/padding/translate) stays with each call site. */
+.tip-card {
+  border-radius: var(--radius);
+  border: 1px solid color-mix(in oklab, var(--foreground) 14%, transparent);
+  background: color-mix(in oklab, var(--popover) 94%, transparent);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  box-shadow:
+    inset 0 1px 0 0 color-mix(in oklab, var(--foreground) 6%, transparent),
+    0 12px 32px -8px rgb(0 0 0 / 0.55);
 }
 
 /* Slow breathing glow shown while hovering the availability gauge. */
@@ -104,6 +158,34 @@
   50%      { opacity: 0.45; }
 }
 .gauge-glow { animation: gaugeGlow 3.6s ease-in-out infinite; }
+
+/* The lit arc eases out to its value on load and whenever the range changes. */
+.gauge-arc { transition: stroke-dashoffset 800ms cubic-bezier(0.16, 1, 0.3, 1); }
+
+/* Status LED: a soft light that breathes, calmer than a ping. Colour comes from
+   --led-c set inline where it's used. */
+@keyframes ledPulse {
+  0%, 100% { box-shadow: 0 0 2px 0 color-mix(in oklab, var(--led-c) 55%, transparent); }
+  50%      { box-shadow: 0 0 9px 2.5px color-mix(in oklab, var(--led-c) 55%, transparent); }
+}
+.led-pulse { animation: ledPulse 2.6s ease-in-out infinite; }
+
+/* Radar sweep behind the all-clear empty state: rings expand and dissolve. */
+@keyframes radarPing {
+  0%   { transform: scale(1); opacity: 0.45; }
+  85%  { transform: scale(2.6); opacity: 0; }
+  100% { transform: scale(2.6); opacity: 0; }
+}
+.radar-ping {
+  animation: radarPing 3s cubic-bezier(0.2, 0.55, 0.4, 1) infinite;
+}
+
+/* First-paint entrance: panels rise into place once. Stagger via inline animation-delay. */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+.fade-up { animation: fadeUp 480ms cubic-bezier(0.16, 1, 0.3, 1) both; }
 
 /* Header wordmark: solid type, no effects - the logo carries the personality. */
 .wordmark {
@@ -114,6 +196,10 @@
 @media (prefers-reduced-motion: reduce) {
   .gauge-glow { animation: none; }
   .animate-ping { animation: none; }
+  .led-pulse { animation: none; }
+  .radar-ping { animation: none; opacity: 0; }
+  .fade-up { animation: none; opacity: 1; transform: none; }
+  .gauge-arc { transition: none; }
 }
 
 /* Printable report: hide the live dashboard + toolbar, leave only the report sheet so
@@ -123,4 +209,5 @@
   .app-shell { display: none !important; }
   .report-sheet { position: static !important; overflow: visible !important; }
   body { background: white !important; }
+  body::before { display: none !important; }
 }

@@ -61,12 +61,12 @@ export function AlertSettings({ alerts, onSaved }: { alerts: AlertConfig; onSave
     <div className="space-y-2.5 text-xs">
       {/* Title with the channel toggle (two buttons) on the right of the same row. */}
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
-        <h2 className="text-[0.95rem] font-semibold tracking-tight">Notify me when my connection returns</h2>
-        <div className="inline-flex shrink-0 rounded-md border border-border bg-muted/30 p-0.5">
+        <h2 className="text-sm font-semibold tracking-tight">Notify me when my connection returns</h2>
+        <div className="inline-flex shrink-0 rounded-lg bg-background/50 p-0.5 ring-1 ring-border/70 shadow-[inset_0_1px_3px_rgba(0,0,0,0.35)]">
           {TYPES.map((o) => (
             <button
               key={o.v} type="button" onClick={() => setType(o.v)}
-              className={`rounded px-2.5 py-1 font-medium transition ${type === o.v ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
+              className={`rounded-md px-2.5 py-1 font-medium transition ${type === o.v ? "bg-primary text-primary-foreground shadow-[0_0_10px_-3px_var(--primary)]" : "text-muted-foreground hover:text-foreground"}`}
             >
               {o.label}
             </button>

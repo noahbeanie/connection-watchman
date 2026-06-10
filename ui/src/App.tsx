@@ -6,6 +6,7 @@ import { toast } from "sonner"
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog"
@@ -47,22 +48,28 @@ const TIMEOUT_OPTS = [
   { v: 2000, label: "2.0 s" }, { v: 3000, label: "3.0 s (lenient)" },
 ]
 
+// Settings dropdown: a real styled popup (Base UI Select) instead of the OS-native
+// <select>, so the open menu matches the app's dark chrome on every platform.
 function ConfigSelect({ value, options, onChange }: {
   value: number; options: { v: number; label: string }[]; onChange: (v: number) => void
 }) {
   return (
-    <select
+    <Select
+      items={options.map((o) => ({ value: o.v, label: o.label }))}
       value={value}
-      onChange={(e) => onChange(Number(e.target.value))}
-      style={{ colorScheme: "dark" }}
-      className="cursor-pointer rounded-md border border-border bg-muted/40 px-2 py-1 font-mono text-xs text-foreground outline-none transition-colors hover:border-foreground/30 focus-visible:ring-2 focus-visible:ring-ring"
+      onValueChange={(v) => { if (v != null) onChange(Number(v)) }}
     >
-      {options.map((o) => (
-        <option key={o.v} value={o.v} style={{ backgroundColor: "var(--popover)", color: "var(--popover-foreground)" }}>
-          {o.label}
-        </option>
-      ))}
-    </select>
+      <SelectTrigger size="sm" className="gap-1 px-2 font-mono text-xs">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {options.map((o) => (
+          <SelectItem key={o.v} value={o.v} className="font-mono text-xs">
+            {o.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   )
 }
 
@@ -299,68 +306,83 @@ export default function App() {
     : []
 
   const sectionHeader = (title: string) => (
-    <p className="mb-1 px-0.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{title}</p>
+    <p className="mb-1.5 flex items-center gap-2 px-0.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground after:h-px after:grow after:bg-border/60 after:content-['']">
+      {title}
+    </p>
   )
 
   return (
     <>
       <Toaster richColors position="bottom-center" />
-      <div className="app-shell mx-auto max-w-[1180px] px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
-        <header className="mb-6 flex items-center justify-between gap-2 sm:gap-4">
-          <div className="flex min-w-0 items-center gap-2.5 sm:gap-3">
-            <img src={watchmanLogo} alt="Connection Watchman logo"
-              className="size-11 shrink-0 rounded-lg object-cover shadow-md shadow-black/40 sm:size-14" />
-            <div className="min-w-0">
-              <h1 className="wordmark break-words text-xl font-semibold leading-[1.1] tracking-tight sm:text-3xl sm:leading-none">
-                Connection Watchman
-              </h1>
+      <div className="app-shell">
+        {/* Full-width sticky bar: the page identity + live status stay in view while the
+            content scrolls beneath a frosted edge. */}
+        <header className="sticky top-0 z-40 border-b border-border/60 bg-background/80 backdrop-blur-md">
+          <div className="mx-auto flex max-w-[1180px] items-center justify-between gap-2 px-4 py-2.5 sm:gap-4 sm:px-6 lg:px-8">
+            {/* Baseline alignment: an img's flex baseline is its bottom edge, so on >=sm the
+                wordmark's baseline sits exactly on the logo's bottom. Phones stay centered
+                because the wordmark can wrap to two lines there. */}
+            <div className="flex min-w-0 items-center gap-2.5 sm:items-baseline sm:gap-3.5">
+              <img src={watchmanLogo} alt="Connection Watchman logo"
+                className="size-12 shrink-0 rounded-lg object-cover shadow-md shadow-black/40 sm:size-18" />
+              <div className="min-w-0">
+                <h1 className="wordmark break-words text-xl font-semibold leading-[1.1] tracking-tight sm:text-4xl sm:leading-none">
+                  Connection Watchman
+                </h1>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              {meta?.first_ts && (
+                <span className="hidden text-xs text-muted-foreground md:inline">
+                  Monitoring since {fmtSince(meta.first_ts)}
+                </span>
+              )}
+              <StatusBadge live={live} meta={meta} />
             </div>
           </div>
-          <div className="flex items-center gap-3">
-            {meta?.first_ts && (
-              <span className="hidden text-xs text-muted-foreground sm:inline">
-                Monitoring since {fmtSince(meta.first_ts)}
-              </span>
-            )}
-            <StatusBadge live={live} meta={meta} />
-          </div>
         </header>
+
+        <div className="mx-auto max-w-[1180px] px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
 
         {/* Top: availability gauge + incident tiles (left) | uptime tracker above latency (right). */}
         <div className="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-[300px_1fr]">
           {/* Left column: availability gauge, then the incident tiles */}
           <div className="order-2 flex flex-col gap-4 lg:order-1">
-            <Card className="flex items-center justify-center p-3">
+            <Card className="fade-up flex items-center justify-center p-3">
               <AvailabilityGauge pct={s?.availability_pct ?? null} presetId={preset} />
             </Card>
-            <StatCard className="grow" icon={TrendingUp} label="Current uptime" accent="var(--up)"
-              value={upStreak} valueColor={upStreakColor}
-              hint="How long the connection has been continuously online right now, with no outages. This is the live streak and ignores the selected time range." />
-            <StatCard className="grow" icon={TrendingDown} label={`Downtime (${periodLabel})`} accent="var(--down)"
-              value={fmtDur(down)} valueColor={down > 0 ? undefined : "var(--muted-foreground)"}
-              hint="Total time the internet was unusable in the selected period: connectivity outages plus DNS failures. Excludes paused and no-data periods." />
-            <StatCard className="grow" icon={Siren} label={`Outages (${periodLabel})`} accent="var(--orange)"
-              value={s ? outs : "—"} valueColor={outs > 0 ? undefined : "var(--muted-foreground)"}
-              hint="How many separate times the internet went unusable in the selected period, both connectivity drops and DNS outages. The list below labels each one's kind." />
-            <StatCard className="grow" icon={Globe} label={`DNS outages (${periodLabel})`} accent="var(--primary)"
-              value={s ? dnsEvents : "—"} valueColor={dnsEvents > 0 ? undefined : "var(--muted-foreground)"}
-              hint="Times name resolution failed in the selected period. Counts as downtime (sites won't load on any device even though the line is up), but tracked as its own kind so you can tell a DNS outage from a connectivity drop." />
+            <Card className="fade-up grow gap-0 divide-y divide-border/40 py-0" style={{ animationDelay: "60ms" }}>
+              <StatCard className="grow" icon={TrendingUp} label="Current uptime" accent="var(--up)"
+                value={upStreak} valueColor={upStreakColor}
+                hint="How long the connection has been continuously online right now, with no outages. This is the live streak and ignores the selected time range." />
+              <StatCard className="grow" icon={TrendingDown} label={`Downtime (${periodLabel})`} accent="var(--down)"
+                value={fmtDur(down)} valueColor={down > 0 ? undefined : "var(--muted-foreground)"}
+                hint="Total time the internet was unusable in the selected period: connectivity outages plus DNS failures. Excludes paused and no-data periods." />
+              <StatCard className="grow" icon={Siren} label={`Outages (${periodLabel})`} accent="var(--orange)"
+                value={s ? outs : "—"} valueColor={outs > 0 ? undefined : "var(--muted-foreground)"}
+                hint="How many separate times the internet went unusable in the selected period, both connectivity drops and DNS outages. The list below labels each one's kind." />
+              <StatCard className="grow" icon={Globe} label={`DNS outages (${periodLabel})`} accent="var(--primary)"
+                value={s ? dnsEvents : "—"} valueColor={dnsEvents > 0 ? undefined : "var(--muted-foreground)"}
+                hint="Times name resolution failed in the selected period. Counts as downtime (sites won't load on any device even though the line is up), but tracked as its own kind so you can tell a DNS outage from a connectivity drop." />
+            </Card>
           </div>
 
           {/* Right column: uptime + latency in one container, shared range tabs and linked hover */}
           <div className="order-1 flex flex-col gap-4 lg:order-2">
-            <Card className="grow p-4 sm:p-5">
+            <Card className="fade-up grow p-4 sm:p-5" style={{ animationDelay: "120ms" }}>
               {/* shared controls: range tabs + live clock */}
               <div className="mb-4 flex flex-wrap items-center gap-3">
                 {/* Wraps on phones: eleven chips don't fit one narrow row. */}
-                <div className="flex w-full flex-wrap gap-1 rounded-lg border bg-muted/30 p-1 sm:inline-flex sm:w-auto sm:flex-nowrap">
+                <div className="flex w-full flex-wrap gap-1 rounded-lg bg-background/50 p-1 ring-1 ring-border/70 shadow-[inset_0_1px_3px_rgba(0,0,0,0.35)] sm:inline-flex sm:w-auto sm:flex-nowrap">
                   {PRESETS.map((p) => {
                     const tooBig = !!(p.span && p.span > availSecs)
+                    const active = preset === p.id
                     const btn = (
                       <Button key={p.id} type="button" size="sm" disabled={tooBig}
-                        variant={preset === p.id ? "default" : "ghost"}
-                        className={`h-8 px-1.5 text-[11px] font-semibold sm:px-3 sm:text-xs ${tooBig ? "w-full sm:w-auto" : "flex-1 sm:flex-none"}`}
+                        variant={active ? "default" : "ghost"}
+                        className={`h-8 px-1.5 font-mono text-xs font-semibold sm:px-3 ${active ? "shadow-[0_0_14px_-4px_var(--primary)]" : ""} ${tooBig ? "w-full sm:w-auto" : "flex-1 sm:flex-none"}`}
                         onClick={() => { setPreset(p.id); setCustomRange(null) }}>
+                        {p.id === "live" && active && <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-current" />}
                         {p.label}
                       </Button>
                     )
@@ -379,7 +401,7 @@ export default function App() {
                   onApply={(start, end) => { setCustomRange({ start, end }); setPreset("custom") }}
                 />
                 {/* Ambient chrome, not data: the user's OS shows a clock, so this stays quiet. */}
-                <span className="font-mono text-sm leading-none tabular-nums text-muted-foreground sm:ml-auto">
+                <span className="font-mono text-sm leading-none tabular-nums text-muted-foreground/70 sm:ml-auto">
                   {nowTs.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true })}
                 </span>
               </div>
@@ -406,7 +428,8 @@ export default function App() {
                 <div className="hidden items-center gap-3 text-xs text-muted-foreground sm:flex">
                   {[["var(--up)", "Up"], ["var(--amber)", "Partial"], ["var(--down)", "Down"], ["var(--paused)", "Paused"], ["var(--gap-band)", "No data"]].map(([c, t]) => (
                     <span key={t} className="flex items-center gap-1.5">
-                      <span className="inline-block size-2.5 rounded-sm" style={{ background: c }} />{t}
+                      <span className="inline-block size-2.5 rounded-sm"
+                        style={{ background: `linear-gradient(to bottom, color-mix(in oklab, ${c} 88%, white), ${c} 55%)` }} />{t}
                     </span>
                   ))}
                 </div>
@@ -459,12 +482,12 @@ export default function App() {
         <div className="grid grid-cols-1 items-stretch gap-4 lg:grid-cols-[1.7fr_1fr]">
           <div className="flex flex-col gap-4">
             {meta && (
-              <Card className="p-4 sm:p-5">
+              <Card className="fade-up p-4 sm:p-5" style={{ animationDelay: "180ms" }}>
                 <AlertSettings alerts={meta.alerts} onSaved={refetchMeta} />
               </Card>
             )}
-            <Card className="flex grow flex-col p-4 sm:p-5">
-              <h2 className="mb-3 text-[0.95rem] font-semibold tracking-tight">
+            <Card className="fade-up flex grow flex-col p-4 sm:p-5" style={{ animationDelay: "240ms" }}>
+              <h2 className="mb-3 text-sm font-semibold tracking-tight">
                 Outages <span className="font-normal text-muted-foreground">({periodLabel})</span>
               </h2>
               {!data ? <Skeleton h={120} />
@@ -476,13 +499,13 @@ export default function App() {
                         <div className="mt-auto flex items-center justify-between gap-2 pt-4 text-xs text-muted-foreground">
                           <button type="button" disabled={outCurPage === 0}
                             onClick={() => setOutPage((p) => Math.max(0, p - 1))}
-                            className="inline-flex items-center gap-1 rounded-md px-2 py-1 font-medium transition hover:text-foreground disabled:pointer-events-none disabled:opacity-30">
+                            className="inline-flex items-center gap-1 rounded-md px-2 py-1 font-medium transition hover:bg-muted/40 hover:text-foreground disabled:pointer-events-none disabled:opacity-30">
                             <ChevronLeft className="size-3.5" />Prev
                           </button>
-                          <span className="tabular-nums">Page {outCurPage + 1} of {outTotalPages} &middot; {rangeNet.length} total</span>
+                          <span className="font-mono tabular-nums">Page {outCurPage + 1} of {outTotalPages} &middot; {rangeNet.length} total</span>
                           <button type="button" disabled={outCurPage >= outTotalPages - 1}
                             onClick={() => setOutPage((p) => Math.min(outTotalPages - 1, p + 1))}
-                            className="inline-flex items-center gap-1 rounded-md px-2 py-1 font-medium transition hover:text-foreground disabled:pointer-events-none disabled:opacity-30">
+                            className="inline-flex items-center gap-1 rounded-md px-2 py-1 font-medium transition hover:bg-muted/40 hover:text-foreground disabled:pointer-events-none disabled:opacity-30">
                             Next<ChevronRight className="size-3.5" />
                           </button>
                         </div>
@@ -492,8 +515,8 @@ export default function App() {
             </Card>
           </div>
 
-          <Card className="p-4 sm:p-5">
-            <h2 className="mb-3 text-[0.95rem] font-semibold tracking-tight">Data &amp; tools</h2>
+          <Card className="fade-up p-4 sm:p-5" style={{ animationDelay: "300ms" }}>
+            <h2 className="mb-3 text-sm font-semibold tracking-tight">Data &amp; tools</h2>
             {dataSections.length > 0 && (
               <div className="mb-4 space-y-3 text-xs">
                 {dataSections.map((sec) => (
@@ -503,7 +526,7 @@ export default function App() {
                       {sec.rows.map(({ label, value, hint, control }) => (
                         <div key={label} className="-mx-2 flex items-center justify-between gap-3 rounded-md px-2 py-1 transition-colors hover:bg-muted/40">
                           <InfoTip label={hint}>
-                            <span className="border-b border-dotted border-muted-foreground/40 text-muted-foreground">{label}</span>
+                            <span className="border-b border-dotted border-muted-foreground/30 text-muted-foreground">{label}</span>
                           </InfoTip>
                           {control ?? <span className="text-right font-mono text-foreground">{value}</span>}
                         </div>
@@ -521,7 +544,7 @@ export default function App() {
                   {meta.resolvers.map((ip) => (
                     <div key={ip} className="-mx-2 flex items-center justify-between gap-3 rounded-md px-2 py-1 transition-colors hover:bg-muted/40">
                       <InfoTip label="A public DNS resolver the monitor queries to confirm name resolution. A confirmed DNS failure counts as downtime, tracked as its own kind.">
-                        <span className="border-b border-dotted border-muted-foreground/40 text-muted-foreground">{resolverName(ip)}</span>
+                        <span className="border-b border-dotted border-muted-foreground/30 text-muted-foreground">{resolverName(ip)}</span>
                       </InfoTip>
                       <span className="text-right font-mono text-foreground">{ip}</span>
                     </div>
@@ -591,6 +614,7 @@ export default function App() {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+        </div>
       </div>
 
       {reportOpen && data && (

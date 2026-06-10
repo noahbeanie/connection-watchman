@@ -111,7 +111,7 @@ export function DateRangePicker({ firstTs, now, value, active, onApply }: {
       <Button
         type="button" size="sm" disabled={noData}
         variant={active ? "default" : "ghost"}
-        className="h-8 gap-1.5 px-2 text-[11px] font-semibold sm:px-3 sm:text-xs"
+        className="h-8 gap-1.5 px-2 text-xs font-semibold sm:px-3"
         onClick={() => (open ? setOpen(false) : openPop())}
       >
         <CalendarIcon className="size-3.5" />
@@ -120,7 +120,7 @@ export function DateRangePicker({ firstTs, now, value, active, onApply }: {
       {open && pos && createPortal(
         <div
           ref={popRef}
-          className="fixed z-50 w-[18rem] rounded-lg border bg-popover p-3 text-popover-foreground shadow-xl"
+          className="tip-card fixed z-50 w-[18rem] p-3 text-popover-foreground"
           style={{ left: Math.max(12, Math.min(pos.x, window.innerWidth - 288 - 12)), top: pos.y }}
         >
           <div className="mb-2 flex items-center justify-between">

@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useState, type CSSProperties } from "react"
 import { StickyNote, Trash2 } from "lucide-react"
 import { CAUSE_LABEL, fmtTime } from "@/lib/format"
 import { CAUSE_DESC } from "@/components/CauseLegend"
@@ -35,7 +35,11 @@ export function OutagesTimeline({ outages, onSaveNote, onDelete }: {
           const confirming = confirmId === o.id
           return (
             <li key={o.id} className="relative">
-              <span className="absolute -left-[23px] top-1 size-2.5 rounded-full ring-4 ring-background" style={{ background: c }} />
+              {/* the rail dot breathes while the outage is still ongoing */}
+              <span
+                className={`absolute -left-[23px] top-1 size-2.5 rounded-full ring-4 ring-background${o.ongoing ? " led-pulse" : ""}`}
+                style={{ background: c, ...(o.ongoing ? ({ "--led-c": c } as CSSProperties) : {}) }}
+              />
               <div className="flex items-center justify-between gap-x-3">
                 <span className="font-mono text-sm tabular-nums">{fmtTime(o.start, true)}</span>
                 <span className="font-mono text-sm font-semibold tabular-nums">{o.duration_h}</span>

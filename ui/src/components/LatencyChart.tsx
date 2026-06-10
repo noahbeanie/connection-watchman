@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, type CSSProperties } from "react"
 import { createPortal } from "react-dom"
 import { Area, AreaChart, CartesianGrid, ReferenceArea, ReferenceLine, XAxis, YAxis } from "recharts"
 import { ChartContainer, ChartTooltip } from "@/components/ui/chart"
@@ -114,25 +114,6 @@ export function LiveTicker({ data }: { data: RangeData }) {
     trend = { x0: x(t0), y0: y(slope * t0 + b0), x1: x(t1), y1: y(slope * t1 + b0) }
   }
 
-  // Line segments: bridge micro-holes (a 1 s cadence legitimately skips the odd second;
-  // dashed flicker on a moving belt would read as packet loss), split on real gaps.
-  const segs: string[] = []
-  const areas: string[] = []
-  let run: { t: number; v: number }[] = []
-  const flush = () => {
-    if (run.length >= 2) {
-      const d = smoothPath(run.map((p) => ({ x: x(p.t), y: y(p.v) })))
-      segs.push(d)
-      areas.push(`${d} L${x(run[run.length - 1].t).toFixed(1)},${H} L${x(run[0].t).toFixed(1)},${H} Z`)
-    }
-    run = []
-  }
-  for (const p of vals) {
-    if (run.length && p.t - run[run.length - 1].t > data.bucket * 2.5) flush()
-    run.push(p)
-  }
-  flush()
-
   // Bands: outage buckets red, recorded gaps grey, paused blue - same language as the
   // main chart, clipped to the window.
   const bands = outageSpans(data.buckets, data.bucket)
@@ -145,17 +126,61 @@ export function LiveTicker({ data }: { data: RangeData }) {
     .map((b) => ({ ...b, x1: Math.max(b.x1, data.start), x2: Math.min(b.x2, data.end) }))
     .filter((b) => b.x2 > b.x1)
 
+  // Line runs: bridge micro-holes (a 1 s cadence legitimately skips the odd second;
+  // dashed flicker on a moving belt would read as packet loss), split on real holes.
+  const runs: { t: number; v: number }[][] = []
+  {
+    let run: { t: number; v: number }[] = []
+    for (const p of vals) {
+      if (run.length && p.t - run[run.length - 1].t > data.bucket * 2.5) { runs.push(run); run = [] }
+      run.push(p)
+    }
+    if (run.length) runs.push(run)
+  }
+  const segs: string[] = []
+  const areas: string[] = []
+  const dots: { cx: number; cy: number }[] = []
+  for (const r of runs) {
+    if (r.length >= 2) {
+      const d = smoothPath(r.map((p) => ({ x: x(p.t), y: y(p.v) })))
+      segs.push(d)
+      areas.push(`${d} L${x(r[r.length - 1].t).toFixed(1)},${H} L${x(r[0].t).toFixed(1)},${H} Z`)
+    } else {
+      dots.push({ cx: x(r[0].t), cy: y(r[0].v) }) // a lone sample between holes still gets a mark
+    }
+  }
+  // Dashed connectors across holes that are bracketed by passing checks and covered by
+  // no band: the line was up the whole time (the checks on both sides prove it), the
+  // monitor just spent those seconds waiting out a slow probe cycle. Faint and dashed
+  // so sampled line and bridged hole stay distinct; outages/gaps stay true breaks.
+  const connectors: { x1: number; y1: number; x2: number; y2: number }[] = []
+  for (let i = 0; i + 1 < runs.length; i++) {
+    const a = runs[i][runs[i].length - 1]
+    const b = runs[i + 1][0]
+    if (!bands.some((bd) => bd.x1 < b.t && bd.x2 > a.t)) {
+      connectors.push({ x1: x(a.t), y1: y(a.v), x2: x(b.t), y2: y(b.v) })
+    }
+  }
+
   const ticks: number[] = []
   for (let t = Math.ceil(data.start / 30) * 30; t < data.end; t += 30) ticks.push(t)
 
   return (
     <div className="flex grow min-h-[150px]">
       {/* static y gutter (34px, matching the big chart's axis width so the strip above stays aligned) */}
-      <div className="relative w-[34px] shrink-0 font-mono text-[10px] text-muted-foreground">
+      <div className="relative w-[34px] shrink-0 font-mono text-[11px] text-muted-foreground">
         <span className="absolute right-1.5 top-0">{maxL}</span>
         <span className="absolute bottom-[14px] right-1.5">0</span>
       </div>
       <div className="relative grow overflow-hidden">
+        {/* fixed LIVE marker: chart chrome, so it does NOT ride the belt */}
+        <div className="pointer-events-none absolute right-2 top-1 z-10 flex items-center gap-1.5 rounded-full bg-background/60 px-2 py-0.5 font-mono text-[11px] font-semibold tracking-widest text-muted-foreground ring-1 ring-border/60 backdrop-blur-sm">
+          <span
+            className="led-pulse size-1.5 rounded-full"
+            style={{ background: "var(--primary)", "--led-c": "var(--primary)" } as CSSProperties}
+          />
+          LIVE
+        </div>
         <div
           className="absolute inset-y-0 left-0 flex flex-col"
           style={{
@@ -180,9 +205,23 @@ export function LiveTicker({ data }: { data: RangeData }) {
                 fill={b.c} fillOpacity={b.o} />
             ))}
             {areas.map((d, i) => <path key={i} d={d} fill="url(#liveTickFill)" />)}
+            {connectors.map((c, i) => (
+              <line key={`br-${i}`} x1={c.x1} y1={c.y1} x2={c.x2} y2={c.y2}
+                stroke="var(--lat-line)" strokeOpacity={0.35} strokeWidth={1.5}
+                strokeDasharray="4 5" vectorEffect="non-scaling-stroke" />
+            ))}
+            {/* soft halo under the line: a wide low-opacity stroke, NOT a blur filter -
+                this SVG repaints every second, so it has to stay cheap */}
+            {segs.map((d, i) => (
+              <path key={`halo-${i}`} d={d} fill="none" stroke="var(--lat-line)" strokeWidth={7}
+                strokeOpacity={0.12} strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+            ))}
             {segs.map((d, i) => (
               <path key={i} d={d} fill="none" stroke="var(--lat-line)" strokeWidth={2}
                 strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+            ))}
+            {dots.map((d, i) => (
+              <circle key={`dot-${i}`} cx={d.cx} cy={d.cy} r={2} fill="var(--lat-line)" />
             ))}
             {trend && (
               <line x1={trend.x0} y1={trend.y0} x2={trend.x1} y2={trend.y1}
@@ -193,7 +232,7 @@ export function LiveTicker({ data }: { data: RangeData }) {
           {/* Time labels ride the belt (they ARE times, sliding is correct for them). A
               freshly minted label eases in over its first seconds of travel instead of
               popping into existence at the right edge. */}
-          <div className="relative h-4 shrink-0 font-mono text-[10px] text-muted-foreground">
+          <div className="relative h-4 shrink-0 font-mono text-[11px] text-muted-foreground">
             {ticks.map((t) => (
               <span
                 key={t} className="absolute -translate-x-1/2"
@@ -306,6 +345,26 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
   const pausedBands = data.gaps.filter((g) => g.kind === "paused").map((g) => clampSpan(g.start, g.end)).filter((b) => b.x2 > b.x1)
   const nodataBands = data.gaps.filter((g) => g.kind !== "paused").map((g) => clampSpan(g.start, g.end)).filter((b) => b.x2 > b.x1)
 
+  // Dashed connectors across sample holes that no band explains: the checks on both
+  // sides passed (the line was up), the monitor just spent those seconds waiting out a
+  // slow probe cycle, so no latency landed. Faint and dashed so sampled line and
+  // bridged hole stay distinct; outage / no-data / paused holes stay true breaks.
+  const allBands = [...bands, ...pausedBands, ...nodataBands]
+  const bridges: { x0: number; y0: number; x1: number; y1: number }[] = []
+  {
+    let i = 0
+    while (i < series.length) {
+      if (series[i].plot == null) { i++; continue }
+      let j = i + 1
+      while (j < series.length && series[j].plot == null) j++
+      if (j < series.length && j > i + 1
+        && !allBands.some((b) => b.x1 < series[j].t && b.x2 > series[i].t)) {
+        bridges.push({ x0: series[i].t, y0: series[i].plot as number, x1: series[j].t, y1: series[j].plot as number })
+      }
+      i = j
+    }
+  }
+
   // Least-squares trend over the visible (clamped) line. Drawn neutral: red/green already
   // mean down/up elsewhere on this chart, so a colored trend would collide with them.
   // Skipped on live/tiny windows, where a "trend" over seconds is jitter, not signal.
@@ -354,7 +413,7 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
         >
           <defs>
             <linearGradient id="latFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="var(--lat-line)" stopOpacity={0.20} />
+              <stop offset="0%" stopColor="var(--lat-line)" stopOpacity={0.24} />
               <stop offset="100%" stopColor="var(--lat-line)" stopOpacity={0.02} />
             </linearGradient>
           </defs>
@@ -368,7 +427,7 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
               return (
                 <text
                   x={x} y={y} dy={12} textAnchor={anchor} fill="var(--muted-foreground)"
-                  style={{ fontSize: 10, fontFamily: "var(--font-mono, monospace)" }}
+                  style={{ fontSize: 11, fontFamily: "var(--font-mono, monospace)" }}
                 >
                   {fmtTime(payload.value, wd)}
                 </text>
@@ -379,7 +438,7 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
               like every other monitoring tool. Units live in the section header. */}
           <YAxis
             domain={[0, maxL]} width={34} tickLine={false} axisLine={false}
-            tick={{ fontSize: 10, fontFamily: "var(--font-mono, monospace)" }}
+            tick={{ fontSize: 11, fontFamily: "var(--font-mono, monospace)" }}
             tickFormatter={(v) => `${v}`}
           />
           {/* Keep a tooltip so Recharts computes the active point for onMouseMove, but render nothing. */}
@@ -393,12 +452,18 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
           {pausedBands.map((b, i) => (
             <ReferenceArea key={`paused-${i}`} x1={b.x1} x2={b.x2}
               fill="var(--paused)" fillOpacity={0.22} stroke="none" ifOverflow="visible"
-              label={{ value: "Paused", position: "center", fill: "var(--paused)", fontSize: 10 }} />
+              label={{ value: "Paused", position: "center", fill: "var(--paused)", fontSize: 11 }} />
           ))}
           {/* Half-transparent red bands over connectivity outages (where the latency line gaps). */}
           {bands.map((b, i) => (
             <ReferenceArea key={`outage-${i}`} x1={b.x1} x2={b.x2}
               fill="var(--down)" fillOpacity={0.3} stroke="none" ifOverflow="visible" />
+          ))}
+          {bridges.map((b, i) => (
+            <ReferenceLine key={`br-${i}`}
+              segment={[{ x: b.x0, y: b.y0 }, { x: b.x1, y: b.y1 }]}
+              stroke="var(--lat-line)" strokeWidth={1.5} strokeDasharray="4 5" strokeOpacity={0.35}
+            />
           ))}
           {trend && (
             <ReferenceLine
@@ -406,6 +471,12 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
               stroke="var(--muted-foreground)" strokeWidth={1.5} strokeDasharray="5 4" strokeOpacity={0.7}
             />
           )}
+          {/* soft halo under the line: a wide low-opacity stroke (no SVG blur filters) */}
+          <Area
+            dataKey="plot" type="monotone" stroke="var(--lat-line)" strokeWidth={7}
+            strokeOpacity={0.12} fill="none" connectNulls={false} isAnimationActive={false}
+            activeDot={false} dot={false}
+          />
           <Area
             dataKey="plot" type="monotone" stroke="var(--lat-line)" strokeWidth={2}
             fill="url(#latFill)" connectNulls={false} isAnimationActive={false}
@@ -419,7 +490,7 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
         createPortal(
           <div
             role="tooltip"
-            className="pointer-events-none fixed z-50 -translate-x-1/2 rounded-lg border bg-popover px-3 py-2 text-xs leading-snug text-popover-foreground shadow-xl"
+            className="tip-card pointer-events-none fixed z-50 -translate-x-1/2 px-3 py-2 text-xs leading-snug text-popover-foreground"
             style={{ left: pos.x, top: pos.y + 6 }}
           >
             {(() => {

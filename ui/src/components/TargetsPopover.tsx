@@ -54,7 +54,7 @@ export function TargetsPopover({ targets, custom, onSaved }: {
       {open && pos && createPortal(
         <div
           ref={popRef}
-          className="fixed z-50 w-[19rem] max-w-[calc(100vw-1.5rem)] overflow-y-auto rounded-lg border bg-popover p-3 text-popover-foreground shadow-xl"
+          className="tip-card fixed z-50 w-[19rem] max-w-[calc(100vw-1.5rem)] overflow-y-auto p-3 text-popover-foreground"
           style={{ left: pos.left, top: pos.top, bottom: pos.bottom, maxHeight: "min(70vh, 420px)" }}
         >
           <div className="mb-2 flex items-center justify-between">
