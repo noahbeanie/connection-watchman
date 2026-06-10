@@ -118,9 +118,10 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
 
   // Least-squares trend over the visible (clamped) line. Drawn neutral: red/green already
   // mean down/up elsewhere on this chart, so a colored trend would collide with them.
+  // Skipped on live/tiny windows, where a "trend" over seconds is jitter, not signal.
   let trend: { x0: number; y0: number; x1: number; y1: number } | null = null
   const tv = series.filter((p): p is typeof p & { plot: number } => p.plot != null)
-  if (tv.length >= 2) {
+  if (tv.length >= 2 && data.end - data.start > 600) {
     const n = tv.length
     const mx = tv.reduce((a, p) => a + p.t, 0) / n
     const my = tv.reduce((a, p) => a + p.plot, 0) / n

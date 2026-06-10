@@ -88,7 +88,8 @@ so they never inflate or deflate the number. Outage history is exact, not bucket
 - **Status-page tracker**: per-slice up / partial / down / no-data; hover for cause and latency.
 - **KPI tiles**: current uptime streak, downtime, outage count, and DNS outages.
 - **Outage log** for the range (paginated), each entry labeled by kind (ISP, your network, DNS).
-- **Range presets** (1H through All) plus a custom date or single day.
+- **Range presets**: a LIVE rolling two-minute view (refreshed every second), then a ladder
+  from 15 minutes to a year plus All, and a custom date range or single day.
 - **Printable report** to hand to your ISP.
 - **Data & tools**: DB size, check interval / retention / response cutoff, notifications, custom
   targets, CSV export, pause, and a guarded reset.
@@ -139,7 +140,10 @@ other traffic stays on the VPN.
 
 ## Storage
 
-At the default interval the check log grows ~15 MB/month and plateaus under ~200 MB (old rows
-trimmed hourly per the dashboard's retention setting). The 1 s interval is great as a live
-troubleshooting view but logs ~15x the rows: budget ~225 MB/month, and consider a shorter
-retention if you leave it on. Outage and event history is kept forever.
+Storage is tiered so a fast check interval doesn't balloon the database. The last 2 days keep
+every check at full resolution (where LIVE / 15-minute zooming happens). Older **healthy** rows
+are thinned hourly to one per 15 s; rows recording a failure are **never** thinned, so outage
+evidence keeps full fidelity forever. Long-term growth therefore stays near the 15 s rate
+(~15 MB/month) even at 1 s checks, and rows past the retention setting are trimmed entirely.
+Outage and event history is kept forever. Tune with `UPTIME_COMPACT_AFTER_DAYS` (0 disables
+thinning) and `UPTIME_COMPACT_GRID` (seconds).

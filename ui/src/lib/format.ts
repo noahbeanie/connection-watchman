@@ -1,12 +1,19 @@
+// A roughly geometric ladder (each step ~3-6x the last) so no wanted range falls in a
+// crack between chips - below 24H the presets are the only way to get a window at all,
+// since Custom picks whole days. 30D matches an ISP billing cycle (the refund-claim
+// unit); 90D is the quarter. LIVE is a rolling ticker refreshed every second (see
+// loadRange's poll tiers): two minutes keeps each 1 s sample wide enough that real
+// jitter reads as a waveform instead of a dense comb.
 export const PRESETS = [
-  // "5 MIN" spelled out: a "5M" chip next to "6M" (months) would be a minutes/months trap.
-  { id: "5min", label: "5 MIN", span: 300, word: "last 5 minutes" },
+  { id: "live", label: "LIVE", span: 120, word: "last 2 minutes" },
+  { id: "15m", label: "15M", span: 900, word: "last 15 minutes" },
   { id: "1h", label: "1H", span: 3600, word: "last hour" },
   { id: "6h", label: "6H", span: 21600, word: "last 6 hours" },
   { id: "24h", label: "24H", span: 86400, word: "last 24 hours" },
+  { id: "3d", label: "3D", span: 259200, word: "last 3 days" },
   { id: "7d", label: "7D", span: 604800, word: "last 7 days" },
   { id: "30d", label: "30D", span: 2592000, word: "last 30 days" },
-  { id: "6mo", label: "6M", span: 15552000, word: "last 6 months" },
+  { id: "90d", label: "90D", span: 7776000, word: "last 90 days" },
   { id: "1y", label: "1Y", span: 31536000, word: "last year" },
   { id: "all", label: "All", span: null as number | null, word: "all time" },
 ]
@@ -144,7 +151,7 @@ export function rangeWord(presetId: string): string {
 // 1Y as data grows). Sub-day presets (1H/6H/24H) are never auto-selected as the default.
 export function defaultPreset(firstTs: number | null): string {
   const avail = firstTs ? nowSec() - firstTs : 0
-  for (const id of ["1y", "6mo", "30d", "7d"]) {
+  for (const id of ["1y", "90d", "30d", "7d"]) {
     const span = PRESETS.find((p) => p.id === id)?.span
     if (span && span <= avail) return id
   }

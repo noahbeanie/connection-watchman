@@ -103,8 +103,9 @@ export default function App() {
   useEffect(() => {
     loadRange()
     const span = PRESETS.find((p) => p.id === preset)?.span ?? Infinity
-    // Tiny windows are a live troubleshooting view, so they refresh near check cadence.
-    const ms = span <= 600 ? 3000 : span <= 86400 ? 10000 : span <= 2592000 ? 30000 : 60000
+    // Tiny windows are a live troubleshooting view: the LIVE preset crawls forward every
+    // second, 15M refreshes every few seconds, day-scale every 10s, and so on up.
+    const ms = span <= 180 ? 1000 : span <= 900 ? 5000 : span <= 86400 ? 10000 : span <= 2592000 ? 30000 : 60000
     const id = setInterval(loadRange, ms)
     return () => clearInterval(id)
   }, [preset, loadRange])
@@ -250,7 +251,7 @@ export default function App() {
             { label: "Live latency", value: liveLat, hint: "The most recent round-trip time to reach the internet." },
             { label: "All-time uptime", value: at ? pctText(at.availability_pct) : "—", hint: "Connectivity uptime since monitoring began, excluding paused and no-data spans." },
             { label: "Total checks", value: at ? at.checks.toLocaleString() : "—", hint: "Number of connectivity checks recorded." },
-            { label: "Avg recovery", value: mttr != null ? fmtDur(mttr) : "No outages", hint: "Mean time to recover: the average length of a connectivity outage." },
+            { label: "Avg recovery", value: mttr != null ? fmtDur(mttr) : "No outages", hint: "Mean time to recover: the average length of a connectivity outage. Time the monitor wasn't running is excluded, so a reboot can't inflate it." },
             { label: "Between outages", value: mtbf != null ? fmtDur(mtbf) : "No outages", hint: "Mean time between failures: monitored time divided by the number of outages." },
             { label: "Last outage", value: lastOut != null ? fmtTime(lastOut, true) : "None recorded", hint: "When the most recent connectivity outage began." },
           ],
@@ -258,7 +259,7 @@ export default function App() {
         {
           title: "Configuration",
           rows: [
-            { label: "Check interval", control: <ConfigSelect value={meta.interval} options={INTERVAL_OPTS} onChange={(v) => updateConfig("interval", v)} />, hint: "How often a connectivity check runs. Takes effect within a cycle; the rest of the app follows the new cadence." },
+            { label: "Check interval", control: <ConfigSelect value={meta.interval} options={INTERVAL_OPTS} onChange={(v) => updateConfig("interval", v)} />, hint: "How often a connectivity check runs. Takes effect within a cycle; the rest of the app follows the new cadence. 1s gives the LIVE view per-second resolution but grows the database fastest (see Database below)." },
             { label: "Response cutoff", control: <ConfigSelect value={meta.timeout_ms} options={TIMEOUT_OPTS} onChange={(v) => updateConfig("timeout_ms", v)} />, hint: "A server must answer within this or the check counts as down (a real outage), so a connection that's technically reachable but too slow to use still registers. Lower is stricter; the retry debounce means only sustained slowness counts, not one-off blips." },
             { label: "Gateway", value: meta.gateway ?? "Unknown", hint: "Your router's local IP. Used to tell a local problem apart from an ISP problem." },
             { label: "Retention", control: <ConfigSelect value={meta.retention_days} options={RETENTION_OPTS} onChange={(v) => updateConfig("retention_days", v)} />, hint: "How long raw per-check data is kept before it's trimmed." },
@@ -270,7 +271,7 @@ export default function App() {
                 <div>
                   <p>Local database file size. The raw check log grows at roughly:</p>
                   <ul className="mt-1.5 space-y-0.5">
-                    {[5, 10, 15, 30, 60].map((iv) => {
+                    {[1, 5, 10, 15, 30, 60].map((iv) => {
                       const mb = (15 * 15) / iv // ~15 MB/month at the 15s default, scales with the check rate
                       return (
                         <li key={iv} className={`flex justify-between gap-3 ${iv === meta.interval ? "font-semibold text-foreground" : ""}`}>
@@ -280,7 +281,11 @@ export default function App() {
                       )
                     })}
                   </ul>
-                  <p className="mt-1.5 text-muted-foreground">Older rows are trimmed at your retention setting, so the file plateaus.</p>
+                  <p className="mt-1.5 text-muted-foreground">
+                    Those rates apply to the last 2 days. Older healthy checks are thinned to one
+                    per 15 s (failures are never thinned), and rows past your retention are trimmed,
+                    so long-term growth stays near the 15 s rate even at 1 s checks.
+                  </p>
                 </div>
               ),
             },
@@ -344,7 +349,8 @@ export default function App() {
             <Card className="grow p-4 sm:p-5">
               {/* shared controls: range tabs + live clock */}
               <div className="mb-4 flex flex-wrap items-center gap-3">
-                <div className="flex w-full gap-1 rounded-lg border bg-muted/30 p-1 sm:inline-flex sm:w-auto">
+                {/* Wraps on phones: eleven chips don't fit one narrow row. */}
+                <div className="flex w-full flex-wrap gap-1 rounded-lg border bg-muted/30 p-1 sm:inline-flex sm:w-auto sm:flex-nowrap">
                   {PRESETS.map((p) => {
                     const tooBig = !!(p.span && p.span > availSecs)
                     const btn = (
@@ -374,6 +380,22 @@ export default function App() {
                   {nowTs.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true })}
                 </span>
               </div>
+
+              {/* LIVE wants per-second data. A view click must never silently rewrite the
+                  monitoring config (it changes collection for everyone, 15x the storage),
+                  so the mismatch is surfaced with a one-click, explicit switch instead. */}
+              {preset === "live" && meta && meta.interval > 1 && (
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 rounded-md border border-[color-mix(in_oklab,var(--amber)_35%,transparent)] bg-[color-mix(in_oklab,var(--amber)_10%,transparent)] px-3 py-2 text-xs">
+                  <span className="text-muted-foreground">
+                    LIVE shows one point per check. Checks run every {meta.interval}s right now, so this
+                    view only gets {Math.max(1, Math.round(120 / meta.interval))} points; at 1s it gets 120.
+                  </span>
+                  <Button size="sm" variant="secondary" className="h-6 px-2 text-xs"
+                    onClick={() => updateConfig("interval", 1)}>
+                    Switch checks to every 1s
+                  </Button>
+                </div>
+              )}
 
               {/* Uptime section: title top-left (mirrors Latency), legend on the right */}
               <div className="mb-1.5 flex items-center justify-between gap-3">

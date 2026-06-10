@@ -30,9 +30,10 @@ drop. DNS is only evaluated while connectivity is up (when the line is down,
 DNS fails too and is already covered by the connectivity outage).
 
 Reboots / pauses create GAPS in the log; gaps are recorded as events and count
-as neither up nor down (so they can never inflate uptime). Raw per-check rows
-are trimmed after UPTIME_RETENTION_DAYS; the tiny outage + event history is kept
-forever.
+as neither up nor down (so they can never inflate uptime). Storage is tiered:
+recent checks keep full resolution, older HEALTHY checks are thinned to a coarse
+grid (failures are never thinned), and rows past UPTIME_RETENTION_DAYS are
+trimmed; the tiny outage + event history is kept forever.
 
 Pure standard library: no pip installs required.
 """
@@ -64,6 +65,16 @@ DNS_PROBE_HOSTS = [h.strip() for h in os.environ.get(
 GATEWAY_IP = os.environ.get("UPTIME_GATEWAY")                  # blank -> auto-discover
 RETENTION_DAYS = int(os.environ.get("UPTIME_RETENTION_DAYS", "365"))
 OUTAGE_RETENTION_DAYS = int(os.environ.get("UPTIME_OUTAGE_RETENTION_DAYS", "0"))  # 0 = forever
+# Tiered retention: the last COMPACT_AFTER_DAYS keep every check (live-zoom territory);
+# beyond that, HEALTHY rows are thinned to one per COMPACT_GRID_S seconds so long-term
+# growth stays near the grid rate no matter how fast checks run. Failure rows (up=0, or
+# a confirmed DNS failure) are NEVER thinned - outage evidence keeps full fidelity, and
+# the outage/event tables are untouched. 0 days disables thinning entirely.
+try:
+    COMPACT_AFTER_DAYS = float(os.environ.get("UPTIME_COMPACT_AFTER_DAYS", "2"))
+except ValueError:
+    COMPACT_AFTER_DAYS = 2.0
+COMPACT_GRID_S = max(1, int(os.environ.get("UPTIME_COMPACT_GRID", "15") or 15))
 # User-adjustable settings (persisted in meta by the dashboard, re-read each cycle).
 # Whitelisted so a bad value can never break the loop.
 CFG_INTERVAL_OPTIONS = (1, 5, 10, 15, 30, 60)
@@ -728,6 +739,31 @@ def trim_old_outages(conn, now, retention_days):
                  (now - retention_days * 86400,))
 
 
+def compact_old_checks(conn, now):
+    """Tiered retention. Checks older than COMPACT_AFTER_DAYS are thinned so that HEALTHY
+    rows keep one sample per COMPACT_GRID_S grid cell (the first in each cell, which makes
+    old latency a deterministic sample rather than an estimate). Rows recording a failure
+    (up=0, or a confirmed DNS failure) are never deleted here, so the evidence record keeps
+    full resolution forever. Incremental via a high-water mark in meta: each hourly run
+    processes only rows that aged past the cutoff since the previous run."""
+    if COMPACT_AFTER_DAYS <= 0:
+        return
+    cutoff = now - int(COMPACT_AFTER_DAYS * 86400)
+    done = int(float(meta_get(conn, "compact_done_ts", "0") or 0))
+    if cutoff <= done:
+        return
+    conn.execute(
+        """DELETE FROM checks
+           WHERE ts >= ? AND ts < ? AND up = 1 AND (dns IS NULL OR dns != 0)
+             AND ts NOT IN (
+               SELECT MIN(ts) FROM checks
+               WHERE ts >= ? AND ts < ? AND up = 1 AND (dns IS NULL OR dns != 0)
+               GROUP BY ts / ?)""",
+        (done, cutoff, done, cutoff, COMPACT_GRID_S),
+    )
+    meta_set(conn, "compact_done_ts", cutoff)
+
+
 # ---- main loop --------------------------------------------------------------
 def stop(signum, frame):
     global _running
@@ -908,10 +944,11 @@ def main():
                     pending_alerts.append(("DNS recovered", "Name resolution is working again.")
                                           if dns_ok else ("DNS failing", DNS_DOWN_MSG))
 
-        # --- hourly retention trim ---
+        # --- hourly retention trim + tiered compaction ---
         if now - last_trim >= 3600:
             trim_old_checks(conn, now, cfg_retention_days(conn))
             trim_old_outages(conn, now, cfg_outage_retention(conn))
+            compact_old_checks(conn, now)
             meta_set(conn, "last_trim_ts", now)
             last_trim = now
 

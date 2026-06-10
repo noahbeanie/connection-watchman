@@ -206,6 +206,62 @@ class PauseReconcileTest(unittest.TestCase):
         self.assertEqual(last["kind"], "pause")
 
 
+class CompactionTest(unittest.TestCase):
+    """Tiered retention: old healthy rows thin to the grid; failure evidence never does."""
+
+    def _insert(self, conn, ts, up=1, dns=1, lat=20):
+        conn.execute("INSERT INTO checks (ts, up, latency_ms, dns) VALUES (?, ?, ?, ?)",
+                     (ts, up, lat, dns))
+
+    def test_old_healthy_rows_thin_failures_survive(self):
+        conn = fresh_conn()
+        now = int(time.time())
+        base = ((now - 3 * 86400) // monitor.COMPACT_GRID_S) * monitor.COMPACT_GRID_S
+        for i in range(30):                       # 30 healthy 1s rows = two 15s grid cells
+            self._insert(conn, base + i)
+        self._insert(conn, base + 40, up=0, dns=None)   # connectivity failure: evidence
+        self._insert(conn, base + 41, up=1, dns=0)      # DNS failure: evidence
+        for i in range(5):                        # recent rows: inside the full-res window
+            self._insert(conn, now - 100 + i)
+        monitor.compact_old_checks(conn, now)
+        old_healthy = conn.execute(
+            "SELECT ts FROM checks WHERE ts < ? AND up=1 AND (dns IS NULL OR dns != 0) ORDER BY ts",
+            (now - 86400,)).fetchall()
+        self.assertEqual([r["ts"] for r in old_healthy],
+                         [base, base + monitor.COMPACT_GRID_S])   # first of each grid cell
+        kept = conn.execute("SELECT COUNT(*) c FROM checks WHERE up=0 OR dns=0").fetchone()["c"]
+        self.assertEqual(kept, 2)                 # both failure rows untouched
+        recent = conn.execute("SELECT COUNT(*) c FROM checks WHERE ts >= ?",
+                              (now - 200,)).fetchone()["c"]
+        self.assertEqual(recent, 5)               # full-res window untouched
+
+    def test_incremental_high_water_mark(self):
+        conn = fresh_conn()
+        now = int(time.time())
+        base = ((now - 3 * 86400) // monitor.COMPACT_GRID_S) * monitor.COMPACT_GRID_S
+        for i in range(15):
+            self._insert(conn, base + i)
+        monitor.compact_old_checks(conn, now)
+        first = conn.execute("SELECT COUNT(*) c FROM checks").fetchone()["c"]
+        monitor.compact_old_checks(conn, now)     # immediate re-run: nothing newly aged
+        self.assertEqual(conn.execute("SELECT COUNT(*) c FROM checks").fetchone()["c"], first)
+        done = int(monitor.meta_get(conn, "compact_done_ts"))
+        self.assertEqual(done, now - int(monitor.COMPACT_AFTER_DAYS * 86400))
+
+    def test_disabled_when_zero_days(self):
+        conn = fresh_conn()
+        now = int(time.time())
+        for i in range(10):
+            self._insert(conn, now - 3 * 86400 + i)
+        orig = monitor.COMPACT_AFTER_DAYS
+        monitor.COMPACT_AFTER_DAYS = 0
+        try:
+            monitor.compact_old_checks(conn, now)
+        finally:
+            monitor.COMPACT_AFTER_DAYS = orig
+        self.assertEqual(conn.execute("SELECT COUNT(*) c FROM checks").fetchone()["c"], 10)
+
+
 class FirstRecordTest(unittest.TestCase):
     def test_all_time_anchors_to_oldest_record_not_oldest_check(self):
         """Check rows are trimmed by retention while outages are kept forever; 'all
