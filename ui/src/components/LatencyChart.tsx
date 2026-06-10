@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import { Area, AreaChart, CartesianGrid, ReferenceArea, ReferenceLine, XAxis, YAxis } from "recharts"
 import { ChartContainer, ChartTooltip } from "@/components/ui/chart"
@@ -26,6 +26,191 @@ function outageSpans(buckets: RangeData["buckets"], bucket: number): { x1: numbe
   }
   if (start != null) spans.push({ x1: start, x2: end })
   return spans
+}
+
+// Monotone cubic path through the points (Fritsch-Carlson tangents, the same family
+// recharts' "monotone" uses): corners are rounded but the curve passes through every
+// data value with NO overshoot, so a latency spike's height is never exaggerated or
+// shaved by the smoothing.
+function smoothPath(pts: { x: number; y: number }[]): string {
+  if (pts.length < 3) {
+    return pts.map((p, i) => `${i ? "L" : "M"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ")
+  }
+  const n = pts.length
+  const dx: number[] = [], d: number[] = []
+  for (let i = 0; i < n - 1; i++) {
+    dx.push(pts[i + 1].x - pts[i].x)
+    d.push((pts[i + 1].y - pts[i].y) / (dx[i] || 1e-6))
+  }
+  const m: number[] = [d[0]]
+  for (let i = 1; i < n - 1; i++) m.push(d[i - 1] * d[i] <= 0 ? 0 : (d[i - 1] + d[i]) / 2)
+  m.push(d[n - 2])
+  for (let i = 0; i < n - 1; i++) {
+    if (d[i] === 0) { m[i] = 0; m[i + 1] = 0; continue }
+    const a = m[i] / d[i], b = m[i + 1] / d[i], s = a * a + b * b
+    if (s > 9) { const t = 3 / Math.sqrt(s); m[i] = t * a * d[i]; m[i + 1] = t * b * d[i] }
+  }
+  let path = `M${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`
+  for (let i = 0; i < n - 1; i++) {
+    const h = dx[i] / 3
+    path += ` C${(pts[i].x + h).toFixed(1)},${(pts[i].y + m[i] * h).toFixed(1)}`
+      + ` ${(pts[i + 1].x - h).toFixed(1)},${(pts[i + 1].y - m[i + 1] * h).toFixed(1)}`
+      + ` ${pts[i + 1].x.toFixed(1)},${pts[i + 1].y.toFixed(1)}`
+  }
+  return path
+}
+
+// Conveyor-belt live chart. The window is fetched one second behind the clock (see
+// windowFor), so the newest bucket is always committed before it scrolls into view; the
+// plot is rendered one tick WIDER than the viewport and slides left via a GPU-composited
+// CSS transform over each 1 s data tick - continuous 60 fps motion with one render per
+// second. Recharts can't do this without its y-axis riding the belt, so the live view
+// uses this purpose-built SVG (same visual language) and a static y gutter.
+export function LiveTicker({ data }: { data: RangeData }) {
+  const [slid, setSlid] = useState(false)
+  const T = Math.max(2, data.end - data.start)
+  useEffect(() => {
+    // New window: snap the belt to 0 without transition, then (two frames later, so the
+    // snap has painted) start the 1 s linear slide toward the next tick.
+    setSlid(false)
+    let r2 = 0
+    const r1 = requestAnimationFrame(() => { r2 = requestAnimationFrame(() => setSlid(true)) })
+    return () => { cancelAnimationFrame(r1); cancelAnimationFrame(r2) }
+  }, [data.end])
+
+  const W = 1000, H = 100, PAD = 6
+  const vals = data.buckets
+    .filter((b) => b.avg != null)
+    .map((b) => ({ t: b.t + data.bucket / 2, v: b.avg as number }))
+  if (!vals.length) {
+    return (
+      <div className="flex grow min-h-[150px] items-center justify-center text-sm text-muted-foreground">
+        Waiting for live samples…
+      </div>
+    )
+  }
+  const fence = latencyFence(vals.map((p) => p.v))
+  const realMax = Math.max(...vals.map((p) => p.v))
+  const maxL = fence === Infinity
+    ? Math.max(20, Math.ceil(realMax / 10) * 10)
+    : Math.max(80, Math.ceil(fence / 10) * 10)
+  const x = (t: number) => ((t - data.start) / T) * W
+  const y = (v: number) => PAD + (1 - Math.max(0, Math.min(v, maxL)) / maxL) * (H - PAD)
+
+  // Rolling least-squares trend over the window, drawn neutral and dashed like the big
+  // chart's. Over two minutes it mostly hugs the average; its value is the moment it
+  // starts tilting during a degradation.
+  let trend: { x0: number; y0: number; x1: number; y1: number } | null = null
+  if (vals.length >= 2) {
+    const n = vals.length
+    const cv = vals.map((p) => ({ t: p.t, v: Math.min(p.v, maxL) }))
+    const mx = cv.reduce((a, p) => a + p.t, 0) / n
+    const my = cv.reduce((a, p) => a + p.v, 0) / n
+    let num = 0, den = 0
+    for (const p of cv) { num += (p.t - mx) * (p.v - my); den += (p.t - mx) ** 2 }
+    const slope = den ? num / den : 0
+    const b0 = my - slope * mx
+    const t0 = cv[0].t, t1 = cv[cv.length - 1].t
+    trend = { x0: x(t0), y0: y(slope * t0 + b0), x1: x(t1), y1: y(slope * t1 + b0) }
+  }
+
+  // Line segments: bridge micro-holes (a 1 s cadence legitimately skips the odd second;
+  // dashed flicker on a moving belt would read as packet loss), split on real gaps.
+  const segs: string[] = []
+  const areas: string[] = []
+  let run: { t: number; v: number }[] = []
+  const flush = () => {
+    if (run.length >= 2) {
+      const d = smoothPath(run.map((p) => ({ x: x(p.t), y: y(p.v) })))
+      segs.push(d)
+      areas.push(`${d} L${x(run[run.length - 1].t).toFixed(1)},${H} L${x(run[0].t).toFixed(1)},${H} Z`)
+    }
+    run = []
+  }
+  for (const p of vals) {
+    if (run.length && p.t - run[run.length - 1].t > data.bucket * 2.5) flush()
+    run.push(p)
+  }
+  flush()
+
+  // Bands: outage buckets red, recorded gaps grey, paused blue - same language as the
+  // main chart, clipped to the window.
+  const bands = outageSpans(data.buckets, data.bucket)
+    .map((b) => ({ x1: b.x1, x2: b.x2, c: "var(--down)", o: 0.3 }))
+    .concat(data.gaps.map((g) => ({
+      x1: g.start, x2: g.end,
+      c: g.kind === "paused" ? "var(--paused)" : "var(--gap-band)",
+      o: g.kind === "paused" ? 0.22 : 0.6,
+    })))
+    .map((b) => ({ ...b, x1: Math.max(b.x1, data.start), x2: Math.min(b.x2, data.end) }))
+    .filter((b) => b.x2 > b.x1)
+
+  const ticks: number[] = []
+  for (let t = Math.ceil(data.start / 30) * 30; t < data.end; t += 30) ticks.push(t)
+
+  return (
+    <div className="flex grow min-h-[150px]">
+      {/* static y gutter (34px, matching the big chart's axis width so the strip above stays aligned) */}
+      <div className="relative w-[34px] shrink-0 font-mono text-[10px] text-muted-foreground">
+        <span className="absolute right-1.5 top-0">{maxL}</span>
+        <span className="absolute bottom-[14px] right-1.5">0</span>
+      </div>
+      <div className="relative grow overflow-hidden">
+        <div
+          className="absolute inset-y-0 left-0 flex flex-col"
+          style={{
+            width: `${((T / (T - 1)) * 100).toFixed(4)}%`,
+            transform: slid ? `translateX(-${(100 / T).toFixed(4)}%)` : "translateX(0)",
+            transition: slid ? "transform 1000ms linear" : "none",
+          }}
+        >
+          <svg className="min-h-0 w-full grow" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="liveTickFill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="var(--lat-line)" stopOpacity={0.2} />
+                <stop offset="100%" stopColor="var(--lat-line)" stopOpacity={0.02} />
+              </linearGradient>
+            </defs>
+            {[0, 0.5, 1].map((f) => (
+              <line key={f} x1={0} x2={W} y1={y(f * maxL)} y2={y(f * maxL)}
+                stroke="var(--border)" strokeOpacity={0.5} vectorEffect="non-scaling-stroke" />
+            ))}
+            {bands.map((b, i) => (
+              <rect key={i} x={x(b.x1)} width={x(b.x2) - x(b.x1)} y={0} height={H}
+                fill={b.c} fillOpacity={b.o} />
+            ))}
+            {areas.map((d, i) => <path key={i} d={d} fill="url(#liveTickFill)" />)}
+            {segs.map((d, i) => (
+              <path key={i} d={d} fill="none" stroke="var(--lat-line)" strokeWidth={2}
+                strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+            ))}
+            {trend && (
+              <line x1={trend.x0} y1={trend.y0} x2={trend.x1} y2={trend.y1}
+                stroke="var(--muted-foreground)" strokeWidth={1.5} strokeOpacity={0.7}
+                strokeDasharray="8 6" vectorEffect="non-scaling-stroke" />
+            )}
+          </svg>
+          {/* Time labels ride the belt (they ARE times, sliding is correct for them). A
+              freshly minted label eases in over its first seconds of travel instead of
+              popping into existence at the right edge. */}
+          <div className="relative h-4 shrink-0 font-mono text-[10px] text-muted-foreground">
+            {ticks.map((t) => (
+              <span
+                key={t} className="absolute -translate-x-1/2"
+                style={{
+                  left: `${((t - data.start) / T) * 100}%`,
+                  opacity: Math.min(1, (data.end - t) / 8),
+                  transition: "opacity 1000ms linear",
+                }}
+              >
+                {fmtTime(t)}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 export function LatencyChart({ data, hoverT, onHoverT }: {
@@ -106,11 +291,16 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
       series.push({ t: p.t + data.bucket, avg: null, plot: null, up: 0, total: 0, est: false })
     }
   }
+  // X domain. Live/tiny windows use the REQUESTED window, so every poll slides the plot
+  // by exactly the elapsed second and motion is a uniform crawl - a data-driven domain
+  // only moves when a new bucket lands (sometimes 0 per poll, sometimes 2), which reads
+  // as stutter. Larger ranges keep the data-driven domain so sparse edges stay trimmed.
+  const liveWin = data.end - data.start <= 900
+  const domMin = liveWin ? data.start : points[0].t
+  const domMax = liveWin ? data.end : points[points.length - 1].t
   // Bands so every line gap is explained: red = connectivity outage (up < total),
   // grey = no-data (reboot/stall), blue = paused. Clamped to the plotted time domain.
-  const tMin = points[0].t
-  const tMax = points[points.length - 1].t
-  const clampSpan = (x1: number, x2: number) => ({ x1: Math.max(x1, tMin), x2: Math.min(x2, tMax) })
+  const clampSpan = (x1: number, x2: number) => ({ x1: Math.max(x1, domMin), x2: Math.min(x2, domMax) })
   const bands = outageSpans(data.buckets, data.bucket).map((b) => clampSpan(b.x1, b.x2)).filter((b) => b.x2 > b.x1)
   // Paused spans get their own blue band (matching the tracker); genuine no-data gaps stay grey.
   const pausedBands = data.gaps.filter((g) => g.kind === "paused").map((g) => clampSpan(g.start, g.end)).filter((b) => b.x2 > b.x1)
@@ -144,9 +334,7 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
     const rect = wrapRef.current.getBoundingClientRect()
     const plotL = rect.left + 34
     const plotR = rect.right - 12
-    const tMin = points[0].t
-    const tMax = points[points.length - 1].t
-    const frac = tMax > tMin ? (hoverT - tMin) / (tMax - tMin) : 0
+    const frac = domMax > domMin ? (hoverT - domMin) / (domMax - domMin) : 0
     const cx = plotL + Math.max(0, Math.min(1, frac)) * (plotR - plotL)
     const half = 130
     pos = { x: Math.min(Math.max(cx, half), window.innerWidth - half), y: rect.top }
@@ -172,7 +360,7 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
           </defs>
           <CartesianGrid vertical={false} stroke="var(--border)" strokeOpacity={0.5} />
           <XAxis
-            dataKey="t" type="number" domain={["dataMin", "dataMax"]}
+            dataKey="t" type="number" domain={[domMin, domMax]}
             tickLine={false} axisLine={false} minTickGap={56}
             tick={(props: any) => {
               const { x, y, payload, index, visibleTicksCount } = props

@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dialog"
 import { Toaster } from "@/components/ui/sonner"
 import { AvailabilityGauge } from "@/components/AvailabilityGauge"
-import { LatencyChart } from "@/components/LatencyChart"
+import { LatencyChart, LiveTicker } from "@/components/LatencyChart"
 import { Tracker } from "@/components/Tracker"
 import { StatCard } from "@/components/StatCard"
 import { StatusBadge } from "@/components/StatusBadge"
@@ -71,7 +71,10 @@ function download(url: string) {
   document.body.appendChild(a); a.click(); a.remove()
 }
 function windowFor(presetId: string) {
-  const end = nowSec()
+  // LIVE renders a conveyor belt: hold its window one second behind the clock so the
+  // newest bucket is always committed before it scrolls into view (no right-edge
+  // pop-in). The whole live card runs ~2 s behind reality; nothing else does.
+  const end = nowSec() - (presetId === "live" ? 1 : 0)
   const span = PRESETS.find((p) => p.id === presetId)?.span
   return { start: span ? end - span : 0, end }
 }
@@ -439,7 +442,11 @@ export default function App() {
                 )}
               </div>
               <div className="flex flex-col h-[160px]">
-                {data ? <LatencyChart data={data} hoverT={hoverT} onHoverT={setHoverT} /> : <Skeleton h={160} />}
+                {data
+                  ? data.end - data.start <= 180
+                    ? <LiveTicker data={data} />
+                    : <LatencyChart data={data} hoverT={hoverT} onHoverT={setHoverT} />
+                  : <Skeleton h={160} />}
               </div>
             </Card>
           </div>

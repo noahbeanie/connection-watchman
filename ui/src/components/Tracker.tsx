@@ -11,6 +11,7 @@ interface Seg {
   t: number; end: number; up: number; total: number
   pct: number | null; avg: number | null; min: number | null; max: number | null
   paused?: boolean
+  noData: boolean    // dominated by RECORDED no-data (gap events / pre-history), not mere check absence
   downFrac: number   // fraction of the slice's MONITORED time inside an outage (0..1)
 }
 
@@ -77,13 +78,20 @@ function toSegments(d: RangeData, target: number): Seg[] {
   const span = Math.max(1, d.end - d.start)
   const per = Math.max(1, Math.ceil(Math.round(span / d.bucket) / target)) // whole buckets per segment
   const slice = per * d.bucket
-  const gridStart = Math.floor(d.start / d.bucket) * d.bucket              // align edges to the bucket grid
+  // Anchor the grid to ABSOLUTE time (multiples of the slice width), not to the window
+  // start: on the sliding LIVE view a start-anchored grid re-phases every second, which
+  // shuffles checks between slices and makes empty slots appear to travel and blink.
+  const gridStart = Math.floor(d.start / slice) * slice
   const n = Math.max(1, Math.ceil((d.end - gridStart) / slice))
   const pausedSpans = d.gaps.filter((g) => g.kind === "paused")
   const downSpans = downSpansOf(d)
+  // Time after the newest recorded bucket isn't a gap, it just hasn't happened/landed
+  // yet (the live edge runs a second or two behind): trim it instead of painting grey.
+  const lastKnown = d.buckets.length ? d.buckets[d.buckets.length - 1].t + d.bucket : d.start
   const out: Seg[] = []
   for (let i = 0; i < n; i++) {
     const s = gridStart + i * slice
+    if (s >= lastKnown) break
     const wEnd = s + slice                      // grid-aligned window used to assign buckets
     const e = i === n - 1 ? d.end : wEnd         // clamp only the shown end of the last segment to the range
     const bs = d.buckets.filter((b) => b.t >= s && b.t < wEnd)
@@ -95,8 +103,10 @@ function toSegments(d: RangeData, target: number): Seg[] {
     // Down fraction from the EXACT outage intervals over the slice's monitored time,
     // with the check counts as a floor (capped outage list on very long ranges).
     const gapOv = overlapSec(s, e, d.gaps)
+    const preHist = d.first_ts != null ? Math.max(0, Math.min(e, d.first_ts) - s) : 0
+    const unknown = gapOv + preHist
     const downOv = overlapSec(s, e, downSpans)
-    const effective = Math.max(0, e - s - gapOv)
+    const effective = Math.max(0, e - s - unknown)
     const intervalFrac = effective > 0 ? Math.min(1, downOv / effective) : 0
     const checkFrac = total > 0 ? (total - up) / total : 0
     out.push({
@@ -106,9 +116,11 @@ function toSegments(d: RangeData, target: number): Seg[] {
       min: mins.length ? Math.min(...mins) : null,
       max: maxs.length ? Math.max(...maxs) : null,
       downFrac: Math.max(intervalFrac, checkFrac),
-      // No checks, no outage, and the slot is mostly inside a paused span -> "paused"
-      // (its own colour). Any other check-less, outage-less slot stays "no data" grey.
-      paused: total === 0 && downOv <= 0 && overlapSec(s, e, pausedSpans) >= (e - s) * 0.5,
+      // Grey/blue mean RECORDED absence (gap events, pauses, before monitoring began),
+      // mirroring the availability math, where un-gapped time counts as monitored even
+      // if no check landed in this exact slot (1 s cadence legitimately skips seconds).
+      paused: downOv <= 0 && overlapSec(s, e, pausedSpans) >= (e - s) * 0.5,
+      noData: downOv <= 0 && unknown >= (e - s) * 0.5,
     })
   }
   return out
@@ -116,8 +128,8 @@ function toSegments(d: RangeData, target: number): Seg[] {
 
 function segColor(s: Seg): string {
   if (s.paused) return "var(--paused)" // monitoring was paused: not an outage
-  if (s.total === 0 && s.downFrac <= 0) return "var(--gap-band)" // no checks, no outage: no data
-  if (s.downFrac <= 0) return "var(--up)" // fully online
+  if (s.noData) return "var(--gap-band)" // recorded gap / pre-history: genuinely unknown
+  if (s.downFrac <= 0) return "var(--up)" // monitored and online (even between sparse checks)
   if (s.downFrac >= 0.999) return "var(--down)" // down the whole (monitored) slice
   // Partially down: the larger the down share of the slice, the redder (amber -> red).
   return `color-mix(in oklab, var(--down) ${Math.round(s.downFrac * 100)}%, var(--amber))`
@@ -220,8 +232,8 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
   const info = activeSeg ? (() => {
     const sg = activeSeg
     const paused = !!sg.paused
-    const down = !paused && sg.downFrac > 0
-    const noData = !paused && !down && sg.total === 0
+    const noData = !paused && sg.noData
+    const down = !paused && !noData && sg.downFrac > 0
     // DNS outages count as downtime, so they belong in the cause line too (labeled "DNS").
     const causes = down
       ? [...new Set(
@@ -321,9 +333,13 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
             ) : info.down ? (
               <div className="mt-1 text-muted-foreground">{info.explain || "The connection was down for this window."}</div>
             ) : info.noData ? (
-              <div className="mt-1 text-muted-foreground">No checks were recorded in this window.</div>
+              <div className="mt-1 text-muted-foreground">The monitor wasn't running for this window.</div>
             ) : (
-              <div className="mt-1 text-muted-foreground">All {info.total} checks passed{info.avg != null ? ` · ${info.avg} ms` : ""}</div>
+              <div className="mt-1 text-muted-foreground">
+                {info.total > 0
+                  ? `All ${info.total} checks passed${info.avg != null ? ` · ${info.avg} ms` : ""}`
+                  : "Monitored and online; the surrounding checks bracket this slice."}
+              </div>
             )}
           </div>,
           document.body,
