@@ -139,6 +139,24 @@ def iso(ts):
     return datetime.fromtimestamp(ts, timezone.utc).isoformat()
 
 
+def iso_local(ts):
+    # Server-local wall time, space-separated so spreadsheets parse it as a real date.
+    # Sits beside the UTC column in exports: local matches what the dashboard shows,
+    # UTC stays the unambiguous reference.
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+
+# Plain-English cause names for exports, matching the dashboard's labels.
+CAUSE_LABELS = {"isp": "ISP / Internet", "local": "Your network", "dns": "DNS", "unknown": "Unknown"}
+
+
+def csv_range_label(start, end):
+    # Human file names: checks_2026-06-09_to_2026-06-10.csv instead of epoch soup.
+    d1 = datetime.fromtimestamp(start).strftime("%Y-%m-%d")
+    d2 = datetime.fromtimestamp(min(end, int(time.time()))).strftime("%Y-%m-%d")
+    return d1 if d1 == d2 else f"{d1}_to_{d2}"
+
+
 # ---- interval math (for gap-corrected availability) ------------------------
 def _merge(intervals):
     if not intervals:
@@ -688,11 +706,11 @@ class Handler(BaseHTTPRequestHandler):
             gw = (r["gw"] if has_gw and r["gw"] is not None else "")
             dns = (r["dns"] if has_dns and r["dns"] is not None else "")
             tgt = (r["target"] if has_target and r["target"] is not None else "")
-            return f'{iso(r["ts"])},{r["up"]},{lat},{gw},{dns},{tgt}\n'
+            return f'{iso(r["ts"])},{iso_local(r["ts"])},{r["up"]},{lat},{gw},{dns},{tgt}\n'
 
         self._stream_csv(
-            f"checks_{start}_{end}.csv",
-            "timestamp_utc,connectivity_up,latency_ms,gateway_reachable,dns_ok,target_answered",
+            f"checks_{csv_range_label(start, end)}.csv",
+            "timestamp_utc,timestamp_local,connectivity_up,latency_ms,gateway_reachable,dns_ok,target_answered",
             f"SELECT {cols} FROM checks WHERE ts>=? AND ts<? ORDER BY ts",
             (start, end), fmt,
         )
@@ -718,20 +736,23 @@ class Handler(BaseHTTPRequestHandler):
             o_end = now if ongoing else r["end_ts"]
             dur = o_end - r["start_ts"]
             end_iso = "" if ongoing else iso(r["end_ts"])
+            end_local = "" if ongoing else iso_local(r["end_ts"])
             cause = r["cause"] or "unknown"
-            kind = r["kind"] or "net"
+            kind = "dns" if (r["kind"] or "net") == "dns" else "connectivity"
             note = r["note"] or ""
             if note[:1] in ("=", "+", "-", "@", "\t"):
                 note = "'" + note            # neutralize spreadsheet formula injection
             note = note.replace('"', '""').replace("\n", " ").replace("\r", " ")
-            return (f'{r["id"]},{iso(r["start_ts"])},{end_iso},'
-                    f'{dur},{fmt_dur(dur)},{cause},{kind},{1 if ongoing else 0},"{note}"\n')
+            return (f'{r["id"]},{iso(r["start_ts"])},{iso_local(r["start_ts"])},{end_iso},{end_local},'
+                    f'{dur},{fmt_dur(dur)},{cause},{CAUSE_LABELS.get(cause, "Unknown")},'
+                    f'{kind},{1 if ongoing else 0},"{note}"\n')
 
         # legacy 'slow'/'unstable' rows (removed quality signals) are filtered like the UI
         kind_where = " AND (kind IS NULL OR kind NOT IN ('slow','unstable'))" if has_kind else ""
         self._stream_csv(
-            f"outages_{start}_{end}.csv",
-            "outage_id,start_time_utc,end_time_utc,duration_seconds,duration_human,cause,outage_type,is_ongoing,note",
+            f"outages_{csv_range_label(start, end)}.csv",
+            "outage_id,start_time_utc,start_time_local,end_time_utc,end_time_local,"
+            "duration_seconds,duration_human,cause,cause_label,outage_type,is_ongoing,note",
             f"SELECT id, start_ts, end_ts, duration_s, {cause_sel}, {kind_sel}, {note_sel} FROM outages "
             f"WHERE start_ts < ? AND (end_ts IS NULL OR end_ts >= ?){kind_where} ORDER BY start_ts",
             (end, start), fmt,

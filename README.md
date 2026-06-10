@@ -149,6 +149,7 @@ Storage is tiered so a fast check interval doesn't balloon the database. The las
 every check at full resolution (where LIVE / 15-minute zooming happens). Older **healthy** rows
 are thinned hourly to one per 15 s; rows recording a failure are **never** thinned, so outage
 evidence keeps full fidelity forever. Long-term growth therefore stays near the 15 s rate
-(~15 MB/month) even at 1 s checks, and rows past the retention setting are trimmed entirely.
+(about 6 MB/month, measured) even at 1 s checks, and rows past the retention setting are
+trimmed entirely.
 Outage and event history is kept forever. Tune with `UPTIME_COMPACT_AFTER_DAYS` (0 disables
 thinning) and `UPTIME_COMPACT_GRID` (seconds).

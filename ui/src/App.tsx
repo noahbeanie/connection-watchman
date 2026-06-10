@@ -278,10 +278,11 @@ export default function App() {
   const liveLat = live?.latency_ms != null ? `${live.latency_ms} ms` : live?.status === "down" ? "Offline" : "—"
   const liveLatColor = live?.latency_ms != null ? latencyColor(live.latency_ms)
     : live?.status === "down" ? "var(--down)" : "var(--muted-foreground)"
-  // Long-term database growth at the current cadence: the last 2 days keep every check,
-  // then healthy rows are thinned to one per 15 s, so sustained growth is capped at the
-  // 15 s rate however fast the checks run.
-  const dbRate = meta ? (15 * 15) / Math.max(meta.interval, 15) : 0
+  // Measured on a live install: one check row (including its index entry) costs about
+  // 33 bytes on disk. Steady growth = checks per month after thinning x 33 B; the newest
+  // 2 days at full resolution are a fixed-size rolling buffer, not growth.
+  const CHECK_BYTES = 33
+  const dbMbMo = (iv: number) => ((2592000 / Math.max(iv, 15)) * CHECK_BYTES) / 1e6
   const dataSections: {
     title: string
     rows: { label: string; hint?: ReactNode; value?: ReactNode; control?: ReactNode; valueColor?: string; sub?: ReactNode }[]
@@ -313,17 +314,16 @@ export default function App() {
               label: "Database",
               // live endpoint carries the size on the 5s poll; meta (30s) is the fallback
               value: humanBytes(live?.db_size_bytes ?? meta.db_size_bytes),
-              sub: `long-term ≈ ${dbRate >= 10 ? Math.round(dbRate) : dbRate.toFixed(1)} MB/mo at every ${meta.interval}s`,
               hint: (
                 <div>
                   <p>
-                    Local database file size. The last 2 days keep every check; older healthy
-                    rows are thinned to one per 15 s (failures are never thinned). Recent-data
-                    growth by check rate:
+                    Database file size. Steady growth is small: checks older than 2 days are
+                    thinned to one per 15 s (failures are never thinned), so the rate barely
+                    depends on the check interval. Measured growth:
                   </p>
                   <ul className="mt-1.5 space-y-0.5">
                     {[1, 5, 10, 15, 30, 60].map((iv) => {
-                      const mb = (15 * 15) / iv
+                      const mb = dbMbMo(iv)
                       return (
                         <li key={iv} className={`flex justify-between gap-3 ${iv === meta.interval ? "font-semibold text-foreground" : ""}`}>
                           <span>Every {iv}s{iv === meta.interval ? " (current)" : ""}</span>
@@ -333,8 +333,9 @@ export default function App() {
                     })}
                   </ul>
                   <p className="mt-1.5 text-muted-foreground">
-                    Thinning caps long-term growth near the 15 s rate even at 1 s checks, and
-                    rows past your retention are trimmed entirely.
+                    On top sits a roughly constant overhead: the newest 2 days at full
+                    resolution (about 6 MB at 1 s checks) plus SQLite's write-ahead log
+                    (a few MB). Rows past your retention are trimmed entirely.
                   </p>
                 </div>
               ),
