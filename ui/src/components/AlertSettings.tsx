@@ -30,12 +30,16 @@ export function AlertSettings({ alerts, onSaved }: { alerts: AlertConfig; onSave
   // A webhook URL is a credential (anyone holding it can post to the channel):
   // masked by default so it can't leak in a glance or a screenshot.
   const [showUrl, setShowUrl] = useState(false)
+  // Once the user touches the form it is a draft: the 30s background meta poll must
+  // not clobber in-progress typing with the server's saved values.
+  const [dirty, setDirty] = useState(false)
 
   useEffect(() => {
+    if (dirty) return
     setType(alerts.type === "webhook" ? "webhook" : "discord")
     setUrl(alerts.url || "")
     setDns(!!alerts.dns)
-  }, [alerts.type, alerts.url, alerts.dns])
+  }, [alerts.type, alerts.url, alerts.dns, dirty])
 
   const persist = () => post("/api/alerts", { type, url: url.trim(), recovery: true, dns })
 
@@ -43,14 +47,15 @@ export function AlertSettings({ alerts, onSaved }: { alerts: AlertConfig; onSave
     setSaving(true)
     const res = await persist()
     setSaving(false)
-    if (res.ok) { toast.success(url.trim() ? "Notifications saved" : "Notifications turned off"); onSaved() }
+    if (res.ok) { setDirty(false); toast.success(url.trim() ? "Notifications saved" : "Notifications turned off"); onSaved() }
     else toast.error("Could not save: " + (await res.text()))
   }
   const test = async () => {
     if (!url.trim()) { toast.error("Add a webhook URL first"); return }
     setTesting(true)
-    await persist()
-    const res = await post("/api/alert/test", {})
+    // The draft rides along WITH the test request and is never saved by it: having a
+    // separate Save button promises that Test does not persist anything.
+    const res = await post("/api/alert/test", { type, url: url.trim() })
     setTesting(false)
     const body = await res.json().catch(() => ({}))
     if (res.ok && body.ok) { toast.success("Test sent. Check your channel.") }
@@ -65,7 +70,7 @@ export function AlertSettings({ alerts, onSaved }: { alerts: AlertConfig; onSave
         <div className="inline-flex shrink-0 rounded-lg bg-background/50 p-0.5 ring-1 ring-border/70 shadow-[inset_0_1px_3px_rgba(0,0,0,0.35)]">
           {TYPES.map((o) => (
             <button
-              key={o.v} type="button" onClick={() => setType(o.v)}
+              key={o.v} type="button" onClick={() => { setType(o.v); setDirty(true) }}
               className={`rounded-md px-2.5 py-1 font-medium transition ${type === o.v ? "bg-primary text-primary-foreground shadow-[0_0_10px_-3px_var(--primary)]" : "text-muted-foreground hover:text-foreground"}`}
             >
               {o.label}
@@ -79,7 +84,7 @@ export function AlertSettings({ alerts, onSaved }: { alerts: AlertConfig; onSave
           of the major managers' field detection for good measure. */}
       <div className="relative">
         <Input
-          value={url} onChange={(e) => setUrl(e.target.value)} placeholder={PLACEHOLDER[type]}
+          value={url} onChange={(e) => { setUrl(e.target.value); setDirty(true) }} placeholder={PLACEHOLDER[type]}
           type="text" autoComplete="off" spellCheck={false} inputMode="url"
           data-bwignore="true" data-1p-ignore="true" data-lpignore="true" data-form-type="other"
           style={!showUrl && url ? ({ WebkitTextSecurity: "disc" } as CSSProperties) : undefined}
@@ -103,7 +108,7 @@ export function AlertSettings({ alerts, onSaved }: { alerts: AlertConfig; onSave
         </Button>
       </div>
       <label className="flex cursor-pointer select-none items-center gap-2 text-xs leading-snug text-muted-foreground">
-        <Switch size="sm" checked={dns} onCheckedChange={setDns} />
+        <Switch size="sm" checked={dns} onCheckedChange={(v) => { setDns(v); setDirty(true) }} />
         Also alert me when DNS fails (sites stop loading on every device even though the line is up).
       </label>
       {/* Both hints share one grid cell, so the tile keeps the height of the taller hint and

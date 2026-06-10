@@ -142,10 +142,10 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
   fetchRange?: (start: number, end: number) => Promise<RangeData>
 }) {
   const [hovSeg, setHovSeg] = useState<{ seg: Seg; idx: number } | null>(null)
-  const [mini, setMini] = useState<{ key: number; bars: { t: number; ok: boolean }[] } | null>(null)
+  const [mini, setMini] = useState<{ key: string; bars: { t: number; state: "up" | "down" | "gap" }[] } | null>(null)
   const [miniHover, setMiniHover] = useState<number | null>(null)
   const [narrow, setNarrow] = useState(() => typeof window !== "undefined" && window.matchMedia("(max-width: 639px)").matches)
-  const miniCache = useRef(new Map<number, { t: number; ok: boolean }[]>())
+  const miniCache = useRef(new Map<string, { t: number; state: "up" | "down" | "gap" }[]>())
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const barRef = useRef<HTMLDivElement>(null)
   const wd = data.end - data.start > 86400
@@ -154,36 +154,49 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
 
   const segs = data.buckets.length ? toSegments(data, target) : []
   // Active segment: the one being hovered (interactive), else the one the shared
-  // hovered time falls in (driven by the latency chart).
+  // hovered time falls in (driven by the latency chart). The hovered segment is
+  // RE-RESOLVED against the current segs every render: data refreshes under an open
+  // tooltip (live polls, preset switches), so the stored segment object can be stale
+  // or gone. Matching by grid-anchored start keeps the tooltip tracking the same slice
+  // with fresh numbers, and drops it cleanly if the slice no longer exists.
+  const hovIdx = hovSeg ? segs.findIndex((s) => s.t === hovSeg.seg.t) : -1
   const extIdx = !hovSeg && hoverT != null ? segs.findIndex((s) => hoverT >= s.t && hoverT < s.end) : -1
-  const activeIdx = hovSeg ? hovSeg.idx : extIdx
-  const activeSeg = hovSeg ? hovSeg.seg : extIdx >= 0 ? segs[extIdx] : null
-  const interactive = !!hovSeg
+  const activeIdx = hovSeg ? hovIdx : extIdx
+  const activeSeg = activeIdx >= 0 ? segs[activeIdx] : null
+  const interactive = !!hovSeg && hovIdx >= 0
   const partial = !!activeSeg && activeSeg.downFrac > 0 && activeSeg.downFrac < 0.999
+  // Drill-down cache key includes the strip's own down fraction, so when an ongoing
+  // outage grows inside a slice the cached breakdown invalidates with it.
+  const miniKey = (s: Seg) => `${s.t}:${Math.round(s.downFrac * 1000)}`
 
   // Fetch a finer breakdown for a partial active segment (cached per segment). Bars are
   // judged by the SAME rule as the strip (failed checks OR exact outage overlap), so the
   // drill-down can never contradict the colour that invited the hover.
   useEffect(() => {
     if (!activeSeg || !partial || !fetchRange) { setMini(null); return }
-    const key = activeSeg.t
+    const key = miniKey(activeSeg)
     const cached = miniCache.current.get(key)
     if (cached) { setMini({ key, bars: cached }); return }
     setMini(null)
     let alive = true
     fetchRange(activeSeg.t, activeSeg.end)
       .then((rd) => {
-        const downs = downSpansOf(rd)
-        const bars = rd.buckets.map((b) => ({
-          t: b.t + rd.bucket / 2,
-          ok: !(b.total > 0 && b.up < b.total) && overlapSec(b.t, b.t + rd.bucket, downs) <= 0,
+        // Slice the drill-down window with the SAME slicer as the strip, so the
+        // breakdown is consistent by construction. Judging only the buckets that hold
+        // checks misses outage tails: failing probes are sparse, so the down part of a
+        // partial slice can contain NO checks at all, which used to render an all-green
+        // breakdown under a "Partial outage" header. Time-based cells paint the outage
+        // red whether or not a check landed inside it.
+        const bars = toSegments(rd, 24).map((cs) => ({
+          t: (cs.t + cs.end) / 2,
+          state: cs.paused || cs.noData ? ("gap" as const) : cs.downFrac > 0 ? ("down" as const) : ("up" as const),
         }))
         miniCache.current.set(key, bars)
         if (alive) setMini({ key, bars })
       })
       .catch(() => {})
     return () => { alive = false }
-  }, [activeSeg?.t, activeSeg?.end, partial, fetchRange])
+  }, [activeSeg?.t, activeSeg?.end, activeSeg?.downFrac, partial, fetchRange])
 
   // Adapt the segment count to viewport width (recomputed on breakpoint change).
   useEffect(() => {
@@ -294,11 +307,11 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
             )}
             {partial ? (
               <div className="mt-1.5">
-                {mini && mini.key === activeSeg.t && mini.bars.length === 0 ? (
+                {mini && mini.key === miniKey(activeSeg) && mini.bars.length === 0 ? (
                   <div className="flex h-7 items-center text-xs text-muted-foreground">
                     No checks landed in this slice; shaded from the exact outage record.
                   </div>
-                ) : mini && mini.key === activeSeg.t ? (
+                ) : mini && mini.key === miniKey(activeSeg) ? (
                   <>
                     <div className="flex h-7 items-stretch gap-[2px]">
                       {mini.bars.map((bar, j) => (
@@ -306,9 +319,9 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
                           key={j} type="button"
                           onMouseEnter={() => { setMiniHover(j); onHoverT?.(bar.t) }}
                           onMouseLeave={() => { setMiniHover(null); onHoverT?.((activeSeg.t + activeSeg.end) / 2) }}
-                          aria-label={`${fmtTime(bar.t, wd)}: ${bar.ok ? "online" : "offline"}`}
+                          aria-label={`${fmtTime(bar.t, wd)}: ${bar.state === "up" ? "online" : bar.state === "down" ? "offline" : "no data"}`}
                           className={`flex-1 rounded-[2px] outline-none transition ${miniHover === j ? "z-10 ring-2 ring-inset ring-white/80 brightness-125" : "opacity-90 hover:opacity-100"}`}
-                          style={{ background: bar.ok ? "var(--up)" : "var(--down)" }}
+                          style={{ background: bar.state === "up" ? "var(--up)" : bar.state === "down" ? "var(--down)" : "var(--gap-band)" }}
                         />
                       ))}
                     </div>
@@ -317,8 +330,8 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
                       {miniHover != null && (
                         <>
                           <span className="font-mono text-muted-foreground">{fmtTime(mini.bars[miniHover].t, wd)}</span>{" "}
-                          <span style={{ color: mini.bars[miniHover].ok ? "var(--up)" : "var(--down)" }}>
-                            {mini.bars[miniHover].ok ? "Online" : "Offline"}
+                          <span style={{ color: mini.bars[miniHover].state === "up" ? "var(--up)" : mini.bars[miniHover].state === "down" ? "var(--down)" : "var(--muted-foreground)" }}>
+                            {mini.bars[miniHover].state === "up" ? "Online" : mini.bars[miniHover].state === "down" ? "Offline" : "No data"}
                           </span>
                         </>
                       )}

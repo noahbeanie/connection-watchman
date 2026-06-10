@@ -1,28 +1,33 @@
 # Connection Watchman
 
-A self-contained tool that runs 24/7 on an always-on machine, logs every internet
-connectivity check to SQLite, and serves a live, mobile-friendly dashboard showing how
-often, and why, your connection drops. Built for holding a flaky ISP accountable: every
-outage is logged with its cause, duration, and exact timestamp, so you can back a support
-ticket or refund claim with hard data instead of "it feels slow."
+**Self-hosted internet uptime monitor: log every connection drop, see who to blame, and hand your ISP the evidence.**
 
-- **Zero dependencies.** Pure Python 3 standard library. Nothing to `pip install`.
+Connection Watchman runs 24/7 on any always-on machine (a Raspberry Pi is perfect), logs
+every internet connectivity check to SQLite, and serves a live, mobile-friendly network
+monitoring dashboard showing how often, and why, your connection drops. Built for holding
+a flaky ISP accountable: every internet outage is logged with its cause, duration, and
+exact timestamp, so you can back a support ticket or refund claim with hard data instead
+of "it feels slow."
+
+- **Zero dependencies.** Pure Python 3 standard library. Nothing to `pip install`, no Docker, no cloud account.
 - **Works offline.** The dashboard ships its own assets (no CDN), so it loads during an outage.
 - **Survives reboots.** Runs as two auto-restarting services (systemd / launchd / Scheduled Tasks).
+- **Blames the right party.** Each outage is classified ISP / your network / DNS by probing your router when the line drops.
+- **ISP-ready evidence.** A printable outage report and CSV export of every check and outage.
 
 ## Screenshots
 
-![Connection Watchman dashboard](docs/screenshots/dashboard.png)
+![Connection Watchman dashboard: uptime gauge, status timeline, and latency chart of the self-hosted internet uptime monitor](docs/screenshots/dashboard2.png)
 
-*Availability gauge, uptime timeline, and latency chart for any range (1H through all-time, or a single day).*
+*Availability gauge, uptime timeline, and a latency chart colored green to red by speed, for any range (a LIVE rolling view through all-time, or a single day).*
 
-![Notifications, outage log, and data tools](docs/screenshots/data-and-tools.png)
+![Discord recovery notifications, internet outage log with causes, and data tools](docs/screenshots/data-and-tools2.png)
 
-*Recovery notifications, the per-range outage log, and the settings / export / pause tools.*
+*Discord / webhook recovery notifications, the per-range outage log with causes, and the settings / export / pause tools.*
 
-![Interactive hover detail on the uptime and latency charts](docs/screenshots/hover-detail.png)
+![Hover tooltips showing outage cause and a per-check drill-down on the uptime and latency charts](docs/screenshots/hover-detail2.png)
 
-*Hover any point to see the cause, the up/down check breakdown, and latency for that moment.*
+*Hover any moment to see the cause, the per-check breakdown, and the latency behind it.*
 
 ## Install
 
@@ -84,7 +89,7 @@ so they never inflate or deflate the number. Outage history is exact, not bucket
 ## Dashboard
 
 - Radial **uptime gauge** for the selected range, graded Excellent to Poor.
-- **Latency chart** with bands marking outages (red), no-data (grey), and paused (blue).
+- **Latency chart** colored green to red by speed, with bands marking outages (red), no-data (grey), and paused (blue).
 - **Status-page tracker**: per-slice up / partial / down / no-data; hover for cause and latency.
 - **KPI tiles**: current uptime streak, downtime, outage count, and DNS outages.
 - **Outage log** for the range (paginated), each entry labeled by kind (ISP, your network, DNS).

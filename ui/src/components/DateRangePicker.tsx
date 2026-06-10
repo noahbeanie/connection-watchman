@@ -70,7 +70,10 @@ export function DateRangePicker({ firstTs, now, value, active, onApply }: {
   const dayDisabled = (d: Date) =>
     !!((minDate && d.getTime() < minDate.getTime()) || d.getTime() > maxDate.getTime())
 
-  const applyDay = (d: Date) => onApply(daySec(d), Math.min(daySec(d) + 86399, now))
+  // The range's end is the END OF THE DAY, even for today: the server clamps each
+  // fetch to "now", so a range that includes today keeps rolling forward instead of
+  // freezing at the moment it was picked and silently missing the rest of the day.
+  const applyDay = (d: Date) => onApply(daySec(d), daySec(d) + 86399)
 
   const pick = (d: Date) => {
     if (dayDisabled(d)) return
@@ -84,7 +87,7 @@ export function DateRangePicker({ firstTs, now, value, active, onApply }: {
     }
     // Second click on / after the start: complete a multi-day range and close.
     setTo(d)
-    onApply(daySec(from), Math.min(daySec(d) + 86399, now))
+    onApply(daySec(from), daySec(d) + 86399)
     setOpen(false)
   }
 

@@ -57,7 +57,10 @@ export function CauseLegend() {
           onBlur={() => setTip(null)}
           className="inline-flex cursor-help items-center gap-1.5 rounded text-xs text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
         >
-          <span className="size-2.5 rounded-sm" style={{ background: c.color }} />
+          <span
+            className="size-2.5 rounded-full"
+            style={{ background: `radial-gradient(circle at 33% 30%, color-mix(in oklab, ${c.color} 55%, white) 0%, ${c.color} 60%, color-mix(in oklab, ${c.color} 78%, black) 100%)` }}
+          />
           {c.label}
         </span>
       ))}

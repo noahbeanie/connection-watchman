@@ -43,13 +43,18 @@ export function ReportView({ data, periodLabel, onClose }: {
           </div>
         </header>
 
-        <section className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3">
+        {/* Connectivity and DNS are split into their own stat boxes so the summary
+            agrees with the connectivity-only log below it (a single "Outages" total
+            used to read higher than the log's count whenever DNS events existed). */}
+        <section className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
           {stat("Uptime", pctText(s.availability_pct))}
           {stat("Total downtime", s.down_seconds > 0 ? fmtDur(s.down_seconds) : "None")}
-          {stat("Outages", String(s.outage_count))}
+          {stat("Connectivity outages", String(s.net_events))}
+          {stat("DNS outages", String(s.dns_events))}
           {stat("Avg recovery", mttr != null ? fmtDur(mttr) : "n/a")}
           {stat("Longest outage", longest > 0 ? fmtDur(longest) : "None")}
           {stat("Avg latency", s.avg_lat != null ? `${s.avg_lat} ms` : "n/a")}
+          {stat("Monitored time", fmtDur(s.monitored_seconds))}
         </section>
 
         <section className="mt-7">

@@ -121,15 +121,6 @@ export function humanBytes(n: number): string {
   return n.toFixed(i ? 1 : 0) + " " + u[i]
 }
 
-// color for the uptime % headline, by health
-export function uptimeColor(p: number | null): string {
-  if (p == null) return "var(--muted-foreground)"
-  if (p >= 99.9) return "var(--up)"
-  if (p >= 95) return "oklch(0.84 0.14 92)"
-  if (p > 0) return "oklch(0.77 0.16 58)"
-  return "var(--down)"
-}
-
 // Plain-language grade for an availability %, with a matching color. Gives the gauge a
 // reference so a glance answers "is this good?" instead of leaving a bare number. Aligned
 // to the gauge's arc thresholds (Excellent >= 99.5, Good >= 98, Fair >= 95, else Poor).
@@ -156,6 +147,43 @@ export function defaultPreset(firstTs: number | null): string {
     if (span && span <= avail) return id
   }
   return "all"
+}
+
+// Absolute latency quality scale, shared by the latency charts and the Live latency
+// stat: green at or under LAT_GOOD, blending through amber around LAT_MID, fully red
+// from LAT_BAD up. Built on the status tokens so the colors track the theme.
+export const LAT_GOOD = 100
+export const LAT_MID = 250
+export const LAT_BAD = 400
+
+export function latencyColor(ms: number | null | undefined): string {
+  if (ms == null) return "var(--muted-foreground)"
+  if (ms <= LAT_GOOD) return "var(--up)"
+  if (ms >= LAT_BAD) return "var(--down)"
+  if (ms <= LAT_MID) {
+    const f = ((ms - LAT_GOOD) / (LAT_MID - LAT_GOOD)) * 100
+    return `color-mix(in oklab, var(--amber) ${f.toFixed(1)}%, var(--up))`
+  }
+  const f = ((ms - LAT_MID) / (LAT_BAD - LAT_MID)) * 100
+  return `color-mix(in oklab, var(--down) ${f.toFixed(1)}%, var(--amber))`
+}
+
+// Stops for a vertical latency gradient whose 0% offset sits at value topV and 100% at
+// value bottomV (chart top is the slow end). Boundary colors plus whichever of the
+// GOOD/MID/BAD waypoints fall strictly inside the span, so the thresholds land at their
+// true heights: a quiet 0-80 ms window comes out solid green (red simply is not on
+// screen), a spiky window shows the full ramp. This is what the early attempt at a
+// quality gradient got wrong: fixed percentage stops made the colors relative to each
+// view's spread instead of absolute milliseconds. Degenerate spans collapse to one stop.
+export function latGradientStops(topV: number, bottomV: number): { offset: number; color: string }[] {
+  if (!(topV > bottomV)) return [{ offset: 0, color: latencyColor(topV) }]
+  const span = topV - bottomV
+  const stops = [{ offset: 0, color: latencyColor(topV) }]
+  for (const v of [LAT_BAD, LAT_MID, LAT_GOOD]) {
+    if (v < topV && v > bottomV) stops.push({ offset: (topV - v) / span, color: latencyColor(v) })
+  }
+  stops.push({ offset: 1, color: latencyColor(bottomV) })
+  return stops
 }
 
 // Robust upper bound for "normal" latency, used to hide spikes that would blow out the

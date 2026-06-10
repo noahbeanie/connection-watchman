@@ -3,7 +3,7 @@ import { createPortal } from "react-dom"
 import { Area, AreaChart, CartesianGrid, ReferenceArea, ReferenceLine, XAxis, YAxis } from "recharts"
 import { ChartContainer, ChartTooltip } from "@/components/ui/chart"
 import type { ChartConfig } from "@/components/ui/chart"
-import { fmtTime, latencyFence } from "@/lib/format"
+import { LAT_BAD, fmtTime, latGradientStops, latencyColor, latencyFence } from "@/lib/format"
 import type { RangeData } from "@/lib/types"
 
 const config = { avg: { label: "Latency", color: "var(--lat-line)" } } satisfies ChartConfig
@@ -91,9 +91,14 @@ export function LiveTicker({ data }: { data: RangeData }) {
   }
   const fence = latencyFence(vals.map((p) => p.v))
   const realMax = Math.max(...vals.map((p) => p.v))
-  const maxL = fence === Infinity
+  let maxL = fence === Infinity
     ? Math.max(20, Math.ceil(realMax / 10) * 10)
     : Math.max(80, Math.ceil(fence / 10) * 10)
+  // Spikes peg at the ceiling rather than stretching the axis; when they do, the ceiling
+  // rises just enough to reach the red zone (never past LAT_BAD), so an off-scale spike
+  // always LOOKS red while a 5000 ms monster still can't blow out the scale. The exact
+  // number lives in the tooltip.
+  if (realMax > maxL && maxL < LAT_BAD) maxL = Math.min(LAT_BAD, Math.ceil(realMax / 10) * 10)
   const x = (t: number) => ((t - data.start) / T) * W
   const y = (v: number) => PAD + (1 - Math.max(0, Math.min(v, maxL)) / maxL) * (H - PAD)
 
@@ -191,9 +196,19 @@ export function LiveTicker({ data }: { data: RangeData }) {
         >
           <svg className="min-h-0 w-full grow" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
             <defs>
-              <linearGradient id="liveTickFill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="var(--lat-line)" stopOpacity={0.2} />
-                <stop offset="100%" stopColor="var(--lat-line)" stopOpacity={0.02} />
+              {/* Latency quality ramp in plot coordinates (y PAD..H = maxL..0), so the
+                  green/amber/red thresholds sit at their true ms heights whatever the
+                  ceiling is. userSpaceOnUse also keeps horizontal pieces (connectors,
+                  dots) on the same ramp instead of degenerating their bboxes. */}
+              <linearGradient id="liveLatGrad" gradientUnits="userSpaceOnUse" x1="0" y1={PAD} x2="0" y2={H}>
+                {latGradientStops(maxL, 0).map((s, i) => (
+                  <stop key={i} offset={s.offset} style={{ stopColor: s.color }} />
+                ))}
+              </linearGradient>
+              <linearGradient id="liveTickFill" gradientUnits="userSpaceOnUse" x1="0" y1={PAD} x2="0" y2={H}>
+                {latGradientStops(maxL, 0).map((s, i) => (
+                  <stop key={i} offset={s.offset} style={{ stopColor: s.color }} stopOpacity={0.04 + (1 - s.offset) * 0.16} />
+                ))}
               </linearGradient>
             </defs>
             {[0, 0.5, 1].map((f) => (
@@ -207,21 +222,21 @@ export function LiveTicker({ data }: { data: RangeData }) {
             {areas.map((d, i) => <path key={i} d={d} fill="url(#liveTickFill)" />)}
             {connectors.map((c, i) => (
               <line key={`br-${i}`} x1={c.x1} y1={c.y1} x2={c.x2} y2={c.y2}
-                stroke="var(--lat-line)" strokeOpacity={0.35} strokeWidth={1.5}
+                stroke="url(#liveLatGrad)" strokeOpacity={0.35} strokeWidth={1.5}
                 strokeDasharray="4 5" vectorEffect="non-scaling-stroke" />
             ))}
             {/* soft halo under the line: a wide low-opacity stroke, NOT a blur filter -
                 this SVG repaints every second, so it has to stay cheap */}
             {segs.map((d, i) => (
-              <path key={`halo-${i}`} d={d} fill="none" stroke="var(--lat-line)" strokeWidth={7}
+              <path key={`halo-${i}`} d={d} fill="none" stroke="url(#liveLatGrad)" strokeWidth={7}
                 strokeOpacity={0.12} strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
             ))}
             {segs.map((d, i) => (
-              <path key={i} d={d} fill="none" stroke="var(--lat-line)" strokeWidth={2}
+              <path key={i} d={d} fill="none" stroke="url(#liveLatGrad)" strokeWidth={2}
                 strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
             ))}
             {dots.map((d, i) => (
-              <circle key={`dot-${i}`} cx={d.cx} cy={d.cy} r={2} fill="var(--lat-line)" />
+              <circle key={`dot-${i}`} cx={d.cx} cy={d.cy} r={2} fill="url(#liveLatGrad)" />
             ))}
             {trend && (
               <line x1={trend.x0} y1={trend.y0} x2={trend.x1} y2={trend.y1}
@@ -315,9 +330,14 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
     data.buckets.filter((b) => b.total > 0 && b.up === b.total && b.avg != null).map((b) => b.avg as number),
   )
   const realMax = Math.max(...valued.map((p) => p.avg))
-  const maxL = fence === Infinity
+  let maxL = fence === Infinity
     ? Math.max(20, Math.ceil(realMax / 10) * 10)
     : Math.max(80, Math.ceil(fence / 10) * 10)
+  // Spikes peg at the ceiling rather than stretching the axis; when they do, the ceiling
+  // rises just enough to reach the red zone (never past LAT_BAD), so an off-scale spike
+  // always LOOKS red while a 5000 ms monster still can't blow out the scale. The exact
+  // number lives in the tooltip.
+  if (realMax > maxL && maxL < LAT_BAD) maxL = Math.min(LAT_BAD, Math.ceil(realMax / 10) * 10)
   // Clamp to the ceiling for plotting, and insert an explicit null break wherever buckets are
   // missing (the backend only emits buckets that had checks, so a no-data span is a time jump):
   // this makes the line genuinely gap there instead of bridging across it. The gap is covered by
@@ -330,6 +350,10 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
       series.push({ t: p.t + data.bucket, avg: null, plot: null, up: 0, total: 0, est: false })
     }
   }
+  // Plotted extremes, for mapping the quality gradient's stops onto the line's bbox.
+  const plotVals = series.map((p) => p.plot).filter((v): v is number => v != null)
+  const minPlotted = Math.min(...plotVals)
+  const maxPlotted = Math.max(...plotVals)
   // X domain. Live/tiny windows use the REQUESTED window, so every poll slides the plot
   // by exactly the elapsed second and motion is a uniform crawl - a data-driven domain
   // only moves when a new bucket lands (sometimes 0 per poll, sometimes 2), which reads
@@ -388,6 +412,11 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
   const nearest = hoverT != null
     ? series.reduce((best, p) => (Math.abs(p.t - hoverT) < Math.abs(best.t - hoverT) ? p : best), series[0])
     : null
+  // When the hover is driven by the TRACKER (segment midpoints), the nearest data
+  // point can sit far from the crosshair on coarse or sparse ranges; labeling the
+  // crosshair with that faraway timestamp reads as a lie. Show the tooltip only when
+  // the nearest point is actually at the hovered position.
+  const nearestClose = nearest != null && hoverT != null && Math.abs(nearest.t - hoverT) <= data.bucket * 1.5
   let pos: { x: number; y: number } | null = null
   if (hoverT != null && wrapRef.current) {
     const rect = wrapRef.current.getBoundingClientRect()
@@ -412,9 +441,20 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
           onMouseLeave={() => onHoverT?.(null)}
         >
           <defs>
+            {/* Quality ramp over the LINE's bbox: stop offsets are computed from the
+                plotted extremes so the green/amber/red thresholds land at absolute ms
+                heights. (A bbox gradient with fixed stops would be relative to each
+                view's spread, which is what sank the early attempt at this.) */}
+            <linearGradient id="latStroke" x1="0" y1="0" x2="0" y2="1">
+              {latGradientStops(maxPlotted, minPlotted).map((s, i) => (
+                <stop key={i} offset={s.offset} style={{ stopColor: s.color }} />
+              ))}
+            </linearGradient>
+            {/* Same ramp for the area fill, whose bbox reaches the zero baseline. */}
             <linearGradient id="latFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="var(--lat-line)" stopOpacity={0.24} />
-              <stop offset="100%" stopColor="var(--lat-line)" stopOpacity={0.02} />
+              {latGradientStops(maxPlotted, 0).map((s, i) => (
+                <stop key={i} offset={s.offset} style={{ stopColor: s.color }} stopOpacity={0.03 + (1 - s.offset) * 0.18} />
+              ))}
             </linearGradient>
           </defs>
           <CartesianGrid vertical={false} stroke="var(--border)" strokeOpacity={0.5} />
@@ -462,7 +502,7 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
           {bridges.map((b, i) => (
             <ReferenceLine key={`br-${i}`}
               segment={[{ x: b.x0, y: b.y0 }, { x: b.x1, y: b.y1 }]}
-              stroke="var(--lat-line)" strokeWidth={1.5} strokeDasharray="4 5" strokeOpacity={0.35}
+              stroke={latencyColor(Math.max(b.y0, b.y1))} strokeWidth={1.5} strokeDasharray="4 5" strokeOpacity={0.35}
             />
           ))}
           {trend && (
@@ -473,12 +513,12 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
           )}
           {/* soft halo under the line: a wide low-opacity stroke (no SVG blur filters) */}
           <Area
-            dataKey="plot" type="monotone" stroke="var(--lat-line)" strokeWidth={7}
+            dataKey="plot" type="monotone" stroke="url(#latStroke)" strokeWidth={7}
             strokeOpacity={0.12} fill="none" connectNulls={false} isAnimationActive={false}
             activeDot={false} dot={false}
           />
           <Area
-            dataKey="plot" type="monotone" stroke="var(--lat-line)" strokeWidth={2}
+            dataKey="plot" type="monotone" stroke="url(#latStroke)" strokeWidth={2}
             fill="url(#latFill)" connectNulls={false} isAnimationActive={false}
           />
           {hoverT != null && (
@@ -486,7 +526,7 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
           )}
         </AreaChart>
       </ChartContainer>
-      {nearest && pos &&
+      {nearest && nearestClose && pos &&
         createPortal(
           <div
             role="tooltip"

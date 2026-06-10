@@ -921,15 +921,21 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     conn.close()
             elif parsed.path == "/api/alert/test":
-                conn = db()
-                try:
-                    def mv(k, d=""):
-                        r = conn.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
-                        return (r["v"] if r else d) or d
-                    url = mv("cfg_alert_url", "")
-                    atype = mv("cfg_alert_type", "discord")
-                finally:
-                    conn.close()
+                # Test the client's DRAFT when provided, WITHOUT saving it: the UI has a
+                # separate Save button, so Test must never silently persist config.
+                # Saved config remains the fallback for requests with no body fields.
+                url = str(data.get("url") or "").strip()
+                atype = data.get("type") if data.get("type") in ALERT_TYPES else ""
+                if not url or not atype:
+                    conn = db()
+                    try:
+                        def mv(k, d=""):
+                            r = conn.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
+                            return (r["v"] if r else d) or d
+                        url = url or mv("cfg_alert_url", "")
+                        atype = atype or mv("cfg_alert_type", "discord")
+                    finally:
+                        conn.close()
                 if not url:
                     self._send(400, json.dumps({"error": "Add a notification URL first"}), "application/json")
                     return

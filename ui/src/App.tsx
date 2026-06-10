@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
-  ChevronLeft, ChevronRight, Download, FileText, Globe, Pause, Play, Siren, Trash2, TrendingDown, TrendingUp,
+  ChevronLeft, ChevronRight, Download, FileText, Globe, Info, Pause, Play, Siren, Trash2, TrendingDown, TrendingUp,
 } from "lucide-react"
 import { toast } from "sonner"
 import { Card } from "@/components/ui/card"
@@ -26,7 +26,7 @@ import { ReportView } from "@/components/ReportView"
 import { InfoTip } from "@/components/InfoTip"
 import type { Live, Meta, RangeData } from "@/lib/types"
 import {
-  PRESETS, defaultPreset, fmtDate, fmtDur, fmtRangeShort, fmtSince, fmtStreak, fmtTime, humanBytes, nowSec, pctText, resolverName,
+  PRESETS, defaultPreset, fmtDate, fmtDur, fmtRangeShort, fmtSince, fmtStreak, fmtTime, humanBytes, latencyColor, nowSec, pctText, resolverName,
 } from "@/lib/format"
 import watchmanLogo from "@/assets/watchman.png"
 
@@ -57,7 +57,7 @@ function ConfigSelect({ value, options, onChange }: {
     <Select
       items={options.map((o) => ({ value: o.v, label: o.label }))}
       value={value}
-      onValueChange={(v) => { if (v != null) onChange(Number(v)) }}
+      onValueChange={(v) => { if (v != null && Number(v) !== value) onChange(Number(v)) }}
     >
       <SelectTrigger size="sm" className="gap-1 px-2 font-mono text-xs">
         <SelectValue />
@@ -105,9 +105,18 @@ export default function App() {
   const [hoverT, setHoverT] = useState<number | null>(null)
   const booted = useRef(false)
 
+  // Monotonic sequence guard: only the newest request may land. Without it, a slow
+  // response from the PREVIOUS preset can resolve after the new one and replace the
+  // view (worst case: the chart branch keys off the data's span, so LIVE would render
+  // the old range's chart).
+  const rangeSeq = useRef(0)
   const loadRange = useCallback(async () => {
+    const seq = ++rangeSeq.current
     const { start, end } = preset === "custom" && customRange ? customRange : windowFor(preset)
-    try { setData(await api(`/api/range?start=${start}&end=${end}`)) } catch { /* keep last */ }
+    try {
+      const d = await api(`/api/range?start=${start}&end=${end}`)
+      if (seq === rangeSeq.current) setData(d)
+    } catch { /* keep last */ }
   }, [preset, customRange])
 
   useEffect(() => {
@@ -124,9 +133,14 @@ export default function App() {
   useEffect(() => { setOutPage(0) }, [preset, customRange])
 
   // All-time fetch powers the lifetime stats in Data & tools (MTTR / MTBF / last outage).
+  const outSeq = useRef(0)
   const loadOutages = useCallback(async () => {
+    const seq = ++outSeq.current
     const start = meta?.first_ts ?? 0
-    try { setAllOutages(await api(`/api/range?start=${start}&end=${nowSec()}`)) } catch { /* keep last */ }
+    try {
+      const d = await api(`/api/range?start=${start}&end=${nowSec()}`)
+      if (seq === outSeq.current) setAllOutages(d)
+    } catch { /* keep last */ }
   }, [meta?.first_ts])
 
   // Fine-grained range fetch for the tracker's partial-segment breakdown popover.
@@ -183,7 +197,14 @@ export default function App() {
   }
   const doReset = async () => {
     const res = await post("/api/reset", { confirm: "RESET" })
-    if (res.ok) { setResetOpen(false); setToken(""); await Promise.allSettled([refetchMeta(), loadRange(), loadOutages()]); toast.success("All data cleared") }
+    if (res.ok) {
+      setResetOpen(false); setToken("")
+      // With no history, every dated preset disables itself: jump to All so the user
+      // lands on a preset that can actually render the fresh empty state.
+      setPreset("all"); setCustomRange(null)
+      await Promise.allSettled([refetchMeta(), loadRange(), loadOutages()])
+      toast.success("All data cleared")
+    }
     else toast.error("Reset failed: " + (await res.text()))
   }
   const updateConfig = async (key: string, value: number) => {
@@ -250,39 +271,59 @@ export default function App() {
   // The net-only fields are used here because these rows are labeled "connectivity".
   const at = allOutages?.summary
   const mttr = at?.mttr_net_s ?? null
-  const mtbf = at && at.outage_count > 0 ? at.monitored_seconds / at.outage_count : null
+  // Net-only denominator, matching the net-only "Avg recovery" and "Last outage" rows
+  // beside it (outage_count would mix DNS events into a connectivity metric).
+  const mtbf = at && at.net_events > 0 ? at.monitored_seconds / at.net_events : null
   const lastOut = at?.last_net_outage_start ?? null
   const liveLat = live?.latency_ms != null ? `${live.latency_ms} ms` : live?.status === "down" ? "Offline" : "—"
-  const dataSections: { title: string; rows: { label: string; hint: ReactNode; value?: ReactNode; control?: ReactNode }[] }[] = meta
+  const liveLatColor = live?.latency_ms != null ? latencyColor(live.latency_ms)
+    : live?.status === "down" ? "var(--down)" : "var(--muted-foreground)"
+  // Long-term database growth at the current cadence: the last 2 days keep every check,
+  // then healthy rows are thinned to one per 15 s, so sustained growth is capped at the
+  // 15 s rate however fast the checks run.
+  const dbRate = meta ? (15 * 15) / Math.max(meta.interval, 15) : 0
+  const dataSections: {
+    title: string
+    rows: { label: string; hint?: ReactNode; value?: ReactNode; control?: ReactNode; valueColor?: string; sub?: ReactNode }[]
+  }[] = meta
     ? [
         {
           title: "Monitoring",
           rows: [
-            { label: "Live latency", value: liveLat, hint: "The most recent round-trip time to reach the internet." },
+            { label: "Live latency", value: liveLat, valueColor: liveLatColor, hint: "The most recent round-trip time to reach the internet, colored by the latency scale: green under 100 ms, through amber, red from 400 ms." },
             { label: "All-time uptime", value: at ? pctText(at.availability_pct) : "—", hint: "Connectivity uptime since monitoring began, excluding paused and no-data spans." },
-            { label: "Total checks", value: at ? at.checks.toLocaleString() : "—", hint: "Number of connectivity checks recorded." },
+            { label: "Total checks", value: at ? at.checks.toLocaleString() : "—" },
             { label: "Avg recovery", value: mttr != null ? fmtDur(mttr) : "No outages", hint: "Mean time to recover: the average length of a connectivity outage. Time the monitor wasn't running is excluded, so a reboot can't inflate it." },
-            { label: "Between outages", value: mtbf != null ? fmtDur(mtbf) : "No outages", hint: "Mean time between failures: monitored time divided by the number of outages." },
-            { label: "Last outage", value: lastOut != null ? fmtTime(lastOut, true) : "None recorded", hint: "When the most recent connectivity outage began." },
+            { label: "Between outages", value: mtbf != null ? fmtDur(mtbf) : "No outages", hint: "Mean time between failures: monitored time divided by the number of connectivity outages." },
+            { label: "Last outage", value: lastOut != null ? fmtTime(lastOut, true) : "None recorded" },
           ],
         },
         {
           title: "Configuration",
           rows: [
-            { label: "Check interval", control: <ConfigSelect value={meta.interval} options={INTERVAL_OPTS} onChange={(v) => updateConfig("interval", v)} />, hint: "How often a connectivity check runs. Takes effect within a cycle; the rest of the app follows the new cadence. 1s gives the LIVE view per-second resolution but grows the database fastest (see Database below)." },
+            { label: "Check interval", control: <ConfigSelect value={meta.interval} options={INTERVAL_OPTS} onChange={(v) => updateConfig("interval", v)} />, hint: "How often a connectivity check runs. Takes effect within a cycle. Faster checks sharpen the LIVE view and write more data; the live growth estimate is under Storage below." },
             { label: "Response cutoff", control: <ConfigSelect value={meta.timeout_ms} options={TIMEOUT_OPTS} onChange={(v) => updateConfig("timeout_ms", v)} />, hint: "A server must answer within this or the check counts as down (a real outage), so a connection that's technically reachable but too slow to use still registers. Lower is stricter; the retry debounce means only sustained slowness counts, not one-off blips." },
             { label: "Gateway", value: meta.gateway ?? "Unknown", hint: "Your router's local IP. Used to tell a local problem apart from an ISP problem." },
-            { label: "Retention", control: <ConfigSelect value={meta.retention_days} options={RETENTION_OPTS} onChange={(v) => updateConfig("retention_days", v)} />, hint: "How long raw per-check data is kept before it's trimmed." },
+          ],
+        },
+        {
+          title: "Storage",
+          rows: [
             {
               label: "Database",
               // live endpoint carries the size on the 5s poll; meta (30s) is the fallback
               value: humanBytes(live?.db_size_bytes ?? meta.db_size_bytes),
+              sub: `long-term ≈ ${dbRate >= 10 ? Math.round(dbRate) : dbRate.toFixed(1)} MB/mo at every ${meta.interval}s`,
               hint: (
                 <div>
-                  <p>Local database file size. The raw check log grows at roughly:</p>
+                  <p>
+                    Local database file size. The last 2 days keep every check; older healthy
+                    rows are thinned to one per 15 s (failures are never thinned). Recent-data
+                    growth by check rate:
+                  </p>
                   <ul className="mt-1.5 space-y-0.5">
                     {[1, 5, 10, 15, 30, 60].map((iv) => {
-                      const mb = (15 * 15) / iv // ~15 MB/month at the 15s default, scales with the check rate
+                      const mb = (15 * 15) / iv
                       return (
                         <li key={iv} className={`flex justify-between gap-3 ${iv === meta.interval ? "font-semibold text-foreground" : ""}`}>
                           <span>Every {iv}s{iv === meta.interval ? " (current)" : ""}</span>
@@ -292,22 +333,29 @@ export default function App() {
                     })}
                   </ul>
                   <p className="mt-1.5 text-muted-foreground">
-                    Those rates apply to the last 2 days. Older healthy checks are thinned to one
-                    per 15 s (failures are never thinned), and rows past your retention are trimmed,
-                    so long-term growth stays near the 15 s rate even at 1 s checks.
+                    Thinning caps long-term growth near the 15 s rate even at 1 s checks, and
+                    rows past your retention are trimmed entirely.
                   </p>
                 </div>
               ),
             },
+            { label: "Retention", control: <ConfigSelect value={meta.retention_days} options={RETENTION_OPTS} onChange={(v) => updateConfig("retention_days", v)} />, hint: "How long raw per-check data is kept before it's trimmed. Resolved outages follow the separate Outage history setting below." },
             { label: "Outage history", control: <ConfigSelect value={meta.outage_retention_days} options={OUTAGE_OPTS} onChange={(v) => updateConfig("outage_retention_days", v)} />, hint: "How long resolved outages are kept. Independent of the raw-data retention above." },
           ],
         },
       ]
     : []
 
-  const sectionHeader = (title: string) => (
+  // Section title with an optional info icon: one icon at the header level replaces
+  // repeating the same tooltip on every row beneath it.
+  const sectionHeader = (title: string, hint?: ReactNode) => (
     <p className="mb-1.5 flex items-center gap-2 px-0.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground after:h-px after:grow after:bg-border/60 after:content-['']">
       {title}
+      {hint && (
+        <InfoTip label={hint} className="cursor-help">
+          <Info className="size-3 text-muted-foreground/60 transition-colors hover:text-muted-foreground" />
+        </InfoTip>
+      )}
     </p>
   )
 
@@ -315,23 +363,25 @@ export default function App() {
     <>
       <Toaster richColors position="bottom-center" />
       <div className="app-shell">
-        {/* Full-width sticky bar: the page identity + live status stay in view while the
-            content scrolls beneath a frosted edge. */}
-        <header className="sticky top-0 z-40 border-b border-border/60 bg-background/80 backdrop-blur-md">
-          <div className="mx-auto flex max-w-[1180px] items-center justify-between gap-2 px-4 py-2.5 sm:gap-4 sm:px-6 lg:px-8">
+        {/* The header scrolls with the page like any other content. */}
+        <header>
+          {/* Everything in the bar sits on one bottom line, a hair above the content:
+              items-end on the row, and the wordmark's invisible font descent is pulled
+              back with -mb so logo bottom, text bottom, and pill bottom agree. */}
+          <div className="mx-auto flex max-w-[1180px] items-end justify-between gap-2 px-4 pt-2.5 pb-0.5 sm:gap-4 sm:px-6 lg:px-8">
             {/* Baseline alignment: an img's flex baseline is its bottom edge, so on >=sm the
                 wordmark's baseline sits exactly on the logo's bottom. Phones stay centered
                 because the wordmark can wrap to two lines there. */}
             <div className="flex min-w-0 items-center gap-2.5 sm:items-baseline sm:gap-3.5">
               <img src={watchmanLogo} alt="Connection Watchman logo"
-                className="size-12 shrink-0 rounded-lg object-cover shadow-md shadow-black/40 sm:size-18" />
+                className="ml-1 size-12 shrink-0 rounded-lg object-cover shadow-md shadow-black/40 sm:ml-1.5 sm:size-18" />
               <div className="min-w-0">
-                <h1 className="wordmark break-words text-xl font-semibold leading-[1.1] tracking-tight sm:text-4xl sm:leading-none">
+                <h1 className="wordmark -mb-[0.2em] break-words text-xl font-semibold leading-[1.1] tracking-tight sm:text-4xl sm:leading-none">
                   Connection Watchman
                 </h1>
               </div>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex items-baseline gap-3">
               {meta?.first_ts && (
                 <span className="hidden text-xs text-muted-foreground md:inline">
                   Monitoring since {fmtSince(meta.first_ts)}
@@ -342,7 +392,7 @@ export default function App() {
           </div>
         </header>
 
-        <div className="mx-auto max-w-[1180px] px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
+        <div className="mx-auto max-w-[1180px] px-4 pt-1.5 pb-6 sm:px-6 sm:pt-2 sm:pb-8 lg:px-8">
 
         {/* Top: availability gauge + incident tiles (left) | uptime tracker above latency (right). */}
         <div className="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-[300px_1fr]">
@@ -494,7 +544,11 @@ export default function App() {
                 : rangeNet.length
                   ? <>
                       <CauseLegend />
-                      <OutagesTimeline outages={shownOut} onSaveNote={saveOutageNote} onDelete={deleteOutage} />
+                      {/* Keyed by the selected range so a range switch clears note/delete
+                          drafts, while page flips and polls keep them (drafts survive). */}
+                      <OutagesTimeline
+                        key={`${preset}:${customRange?.start ?? 0}-${customRange?.end ?? 0}`}
+                        outages={shownOut} onSaveNote={saveOutageNote} onDelete={deleteOutage} />
                       {outTotalPages > 1 && (
                         <div className="mt-auto flex items-center justify-between gap-2 pt-4 text-xs text-muted-foreground">
                           <button type="button" disabled={outCurPage === 0}
@@ -502,7 +556,9 @@ export default function App() {
                             className="inline-flex items-center gap-1 rounded-md px-2 py-1 font-medium transition hover:bg-muted/40 hover:text-foreground disabled:pointer-events-none disabled:opacity-30">
                             <ChevronLeft className="size-3.5" />Prev
                           </button>
-                          <span className="font-mono tabular-nums">Page {outCurPage + 1} of {outTotalPages} &middot; {rangeNet.length} total</span>
+                          <span className="font-mono tabular-nums">
+                            Page {outCurPage + 1} of {outTotalPages} &middot; {rangeNet.length}{outs > rangeNet.length ? ` of ${outs}` : ""} total
+                          </span>
                           <button type="button" disabled={outCurPage >= outTotalPages - 1}
                             onClick={() => setOutPage((p) => Math.min(outTotalPages - 1, p + 1))}
                             className="inline-flex items-center gap-1 rounded-md px-2 py-1 font-medium transition hover:bg-muted/40 hover:text-foreground disabled:pointer-events-none disabled:opacity-30">
@@ -523,12 +579,28 @@ export default function App() {
                   <div key={sec.title}>
                     {sectionHeader(sec.title)}
                     <div className="space-y-0.5">
-                      {sec.rows.map(({ label, value, hint, control }) => (
-                        <div key={label} className="-mx-2 flex items-center justify-between gap-3 rounded-md px-2 py-1 transition-colors hover:bg-muted/40">
-                          <InfoTip label={hint}>
-                            <span className="border-b border-dotted border-muted-foreground/30 text-muted-foreground">{label}</span>
-                          </InfoTip>
-                          {control ?? <span className="text-right font-mono text-foreground">{value}</span>}
+                      {sec.rows.map(({ label, value, hint, control, valueColor, sub }) => (
+                        <div key={label} className="group -mx-2 flex items-center justify-between gap-3 rounded-md px-2 py-1 transition-colors hover:bg-muted/40">
+                          {/* Self-evident rows carry no help at all; rows that keep help show a
+                              small info glyph and the whole label is the hover target. */}
+                          {hint ? (
+                            <InfoTip label={hint} className="cursor-help">
+                              <span className="flex items-center gap-1 text-muted-foreground">
+                                {label}
+                                <Info className="size-3 shrink-0 text-muted-foreground/60 transition-colors group-hover:text-muted-foreground" />
+                              </span>
+                            </InfoTip>
+                          ) : (
+                            <span className="text-muted-foreground">{label}</span>
+                          )}
+                          {control ?? (
+                            <span className="min-w-0 text-right">
+                              <span className="block font-mono text-foreground" style={valueColor ? { color: valueColor } : undefined}>
+                                {value}
+                              </span>
+                              {sub && <span className="block text-xs text-muted-foreground">{sub}</span>}
+                            </span>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -539,13 +611,11 @@ export default function App() {
 
             {meta && !!meta.resolvers?.length && (
               <div className="mb-4">
-                {sectionHeader("DNS resolvers")}
+                {sectionHeader("DNS resolvers", "Public DNS resolvers the monitor queries to confirm name resolution. DNS only counts as down when every name fails on every resolver; a confirmed failure counts as downtime, tracked as its own kind.")}
                 <div className="space-y-0.5 text-xs">
                   {meta.resolvers.map((ip) => (
                     <div key={ip} className="-mx-2 flex items-center justify-between gap-3 rounded-md px-2 py-1 transition-colors hover:bg-muted/40">
-                      <InfoTip label="A public DNS resolver the monitor queries to confirm name resolution. A confirmed DNS failure counts as downtime, tracked as its own kind.">
-                        <span className="border-b border-dotted border-muted-foreground/30 text-muted-foreground">{resolverName(ip)}</span>
-                      </InfoTip>
+                      <span className="text-muted-foreground">{resolverName(ip)}</span>
                       <span className="text-right font-mono text-foreground">{ip}</span>
                     </div>
                   ))}
@@ -557,18 +627,20 @@ export default function App() {
               </div>
             )}
 
+            {/* Verb buttons explain themselves; only Report keeps a tip, because the
+                ISP-ready printable artifact behind it is not guessable from the label. */}
             <div className="flex flex-wrap gap-2 border-t border-border/40 pt-3">
-              <InfoTip focusable={false} className="min-w-[7rem] flex-1" label="Download your full check log and outage log as CSV files.">
+              <div className="min-w-[7rem] flex-1">
                 <Button variant="secondary" size="sm" className="w-full" onClick={exportData}><Download className="size-4" />Export</Button>
-              </InfoTip>
+              </div>
               <InfoTip focusable={false} className="min-w-[7rem] flex-1" label="Open a clean, printable report of this period's outages to save as PDF or hand to your ISP.">
                 <Button variant="secondary" size="sm" className="w-full" disabled={!data} onClick={() => setReportOpen(true)}><FileText className="size-4" />Report</Button>
               </InfoTip>
-              <InfoTip focusable={false} className="min-w-[7rem] flex-1" label={meta?.paused ? "Resume recording checks." : "Temporarily stop recording checks."}>
+              <div className="min-w-[7rem] flex-1">
                 <Button variant="secondary" size="sm" className="w-full" onClick={() => setPause(!meta?.paused)}>
                   {meta?.paused ? <><Play className="size-4" />Resume</> : <><Pause className="size-4" />Pause</>}
                 </Button>
-              </InfoTip>
+              </div>
             </div>
             {/* Timed-pause helpers / resume countdown */}
             {meta?.paused ? (

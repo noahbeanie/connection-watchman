@@ -187,10 +187,22 @@
 }
 .fade-up { animation: fadeUp 480ms cubic-bezier(0.16, 1, 0.3, 1) both; }
 
-/* Header wordmark: solid type, no effects - the logo carries the personality. */
+/* Header wordmark: ghosted, debossed type. A dark steel gradient sits barely above the
+   page (the logo carries the brightness); the hairline light edge underneath reads as
+   stamped-into-the-surface. drop-shadow (not text-shadow) because text-shadow paints
+   THROUGH transparent background-clip glyphs. */
 .wordmark {
   font-family: 'Space Grotesk Variable', sans-serif;
-  color: var(--foreground);
+  background-image: linear-gradient(
+    to bottom,
+    oklch(0.78 0.012 230) 0%,
+    oklch(0.7 0.015 230) 50%,
+    oklch(0.34 0.022 232) 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 1px 0 rgb(255 255 255 / 0.06));
 }
 
 @media (prefers-reduced-motion: reduce) {
