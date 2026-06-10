@@ -34,7 +34,7 @@ const post = (p: string, body: unknown) =>
   fetch(p, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
 
 // Editable settings (values must match the backend whitelist in dashboard.py CFG_OPTIONS).
-const INTERVAL_OPTS = [5, 10, 15, 30, 60].map((v) => ({ v, label: `Every ${v}s` }))
+const INTERVAL_OPTS = [1, 5, 10, 15, 30, 60].map((v) => ({ v, label: `Every ${v}s` }))
 const RETENTION_OPTS = [
   { v: 30, label: "30 days" }, { v: 90, label: "90 days" }, { v: 180, label: "180 days" },
   { v: 365, label: "365 days" }, { v: 0, label: "Forever" },
@@ -103,7 +103,8 @@ export default function App() {
   useEffect(() => {
     loadRange()
     const span = PRESETS.find((p) => p.id === preset)?.span ?? Infinity
-    const ms = span <= 86400 ? 10000 : span <= 2592000 ? 30000 : 60000
+    // Tiny windows are a live troubleshooting view, so they refresh near check cadence.
+    const ms = span <= 600 ? 3000 : span <= 86400 ? 10000 : span <= 2592000 ? 30000 : 60000
     const id = setInterval(loadRange, ms)
     return () => clearInterval(id)
   }, [preset, loadRange])
@@ -227,7 +228,10 @@ export default function App() {
   // up-streak), independent of the selected range.
   const upStreak = live?.status === "up" ? fmtStreak(live.streak_seconds ?? 0)
     : live?.status === "down" ? "Offline" : meta?.paused ? "Paused" : "—"
-  const upStreakColor = live?.status === "up" ? "var(--up)" : live?.status === "down" ? "var(--down)" : "var(--muted-foreground)"
+  // Colour is reserved for exceptional state (offline) and for dimming empty values;
+  // healthy numbers stay foreground so the icon chips carry the category colours alone.
+  const upStreakColor = live?.status === "down" ? "var(--down)"
+    : live?.status === "up" ? undefined : "var(--muted-foreground)"
 
   // All-time stats (from the first-check fetch) + live, for the Data & tools panel.
   // MTTR / last outage come from server-side aggregates over ALL outages — the outages
@@ -260,7 +264,8 @@ export default function App() {
             { label: "Retention", control: <ConfigSelect value={meta.retention_days} options={RETENTION_OPTS} onChange={(v) => updateConfig("retention_days", v)} />, hint: "How long raw per-check data is kept before it's trimmed." },
             {
               label: "Database",
-              value: humanBytes(meta.db_size_bytes),
+              // live endpoint carries the size on the 5s poll; meta (30s) is the fallback
+              value: humanBytes(live?.db_size_bytes ?? meta.db_size_bytes),
               hint: (
                 <div>
                   <p>Local database file size. The raw check log grows at roughly:</p>
@@ -286,7 +291,7 @@ export default function App() {
     : []
 
   const sectionHeader = (title: string) => (
-    <p className="mb-1 px-0.5 text-[0.65rem] font-semibold uppercase tracking-wider text-muted-foreground/60">{title}</p>
+    <p className="mb-1 px-0.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{title}</p>
   )
 
   return (
@@ -294,19 +299,19 @@ export default function App() {
       <Toaster richColors position="bottom-center" />
       <div className="app-shell mx-auto max-w-[1180px] px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
         <header className="mb-6 flex items-center justify-between gap-2 sm:gap-4">
-          <div className="flex min-w-0 items-end gap-2 sm:gap-3">
+          <div className="flex min-w-0 items-center gap-2.5 sm:gap-3">
             <img src={watchmanLogo} alt="Connection Watchman logo"
-              className="size-20 shrink-0 rounded-xl object-cover shadow-lg shadow-black/40 sm:size-24" />
+              className="size-11 shrink-0 rounded-lg object-cover shadow-md shadow-black/40 sm:size-14" />
             <div className="min-w-0">
-              <h1 className="wordmark break-words text-2xl font-bold leading-[1.1] tracking-tight sm:text-5xl sm:leading-none">
+              <h1 className="wordmark break-words text-xl font-semibold leading-[1.1] tracking-tight sm:text-3xl sm:leading-none">
                 Connection Watchman
               </h1>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             {meta?.first_ts && (
-              <span className="hidden text-xs font-medium text-foreground/90 sm:inline">
-                Scan running since {fmtSince(meta.first_ts)}
+              <span className="hidden text-xs text-muted-foreground sm:inline">
+                Monitoring since {fmtSince(meta.first_ts)}
               </span>
             )}
             <StatusBadge live={live} meta={meta} />
@@ -324,13 +329,13 @@ export default function App() {
               value={upStreak} valueColor={upStreakColor}
               hint="How long the connection has been continuously online right now, with no outages. This is the live streak and ignores the selected time range." />
             <StatCard className="grow" icon={TrendingDown} label={`Downtime (${periodLabel})`} accent="var(--down)"
-              value={fmtDur(down)} valueColor={down > 0 ? "var(--down)" : "var(--muted-foreground)"}
+              value={fmtDur(down)} valueColor={down > 0 ? undefined : "var(--muted-foreground)"}
               hint="Total time the internet was unusable in the selected period: connectivity outages plus DNS failures. Excludes paused and no-data periods." />
             <StatCard className="grow" icon={Siren} label={`Outages (${periodLabel})`} accent="var(--orange)"
-              value={s ? outs : "—"} valueColor={outs > 0 ? "var(--orange)" : "var(--muted-foreground)"}
+              value={s ? outs : "—"} valueColor={outs > 0 ? undefined : "var(--muted-foreground)"}
               hint="How many separate times the internet went unusable in the selected period, both connectivity drops and DNS outages. The list below labels each one's kind." />
             <StatCard className="grow" icon={Globe} label={`DNS outages (${periodLabel})`} accent="var(--primary)"
-              value={s ? dnsEvents : "—"} valueColor={dnsEvents > 0 ? "var(--primary)" : "var(--muted-foreground)"}
+              value={s ? dnsEvents : "—"} valueColor={dnsEvents > 0 ? undefined : "var(--muted-foreground)"}
               hint="Times name resolution failed in the selected period. Counts as downtime (sites won't load on any device even though the line is up), but tracked as its own kind so you can tell a DNS outage from a connectivity drop." />
           </div>
 
@@ -364,7 +369,8 @@ export default function App() {
                   active={preset === "custom"}
                   onApply={(start, end) => { setCustomRange({ start, end }); setPreset("custom") }}
                 />
-                <span className="font-mono text-2xl font-bold leading-none tabular-nums text-foreground sm:ml-auto sm:text-4xl">
+                {/* Ambient chrome, not data: the user's OS shows a clock, so this stays quiet. */}
+                <span className="font-mono text-sm leading-none tabular-nums text-muted-foreground sm:ml-auto">
                   {nowTs.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true })}
                 </span>
               </div>
@@ -382,20 +388,31 @@ export default function App() {
               </div>
               <div className="flex grow flex-col pl-[34px] pr-3">
                 {data ? <Tracker data={data} hoverT={hoverT} onHoverT={setHoverT} fetchRange={fetchRange} /> : <Skeleton h={96} />}
+                {/* Quarter-point time labels, mirroring the latency chart's axis below (the
+                    pl/pr above match its y-axis width + right margin, so positions line up).
+                    The end label reads "Now" only when the range actually ends at the present. */}
                 <div className="mt-2.5 flex justify-between font-mono text-xs text-muted-foreground">
-                  <span>{data ? (wd ? fmtDate(data.start) : fmtTime(data.start)) : ""} <span className="opacity-60">(Local Time)</span></span>
-                  <span>Now</span>
+                  {data
+                    ? [0, 0.25, 0.5, 0.75, 1].map((f, i, arr) => {
+                        const t = data.start + (data.end - data.start) * f
+                        const last = i === arr.length - 1
+                        const endsNow = data.end >= data.now - 2 * (data.interval || 15)
+                        return (
+                          <span key={f} className={!last && i > 0 ? "hidden sm:inline" : ""}>
+                            {last && endsNow ? "Now" : wd ? fmtDate(t) : fmtTime(t)}
+                          </span>
+                        )
+                      })
+                    : <span />}
                 </div>
               </div>
 
               {/* Latency section */}
               <div className="mb-2 mt-5 flex items-center justify-between border-t border-border/40 pt-4">
-                <h2 className="text-sm font-semibold tracking-tight">
-                  Latency <span className="font-normal text-muted-foreground/70">(lower is faster)</span>
-                </h2>
+                <h2 className="text-sm font-semibold tracking-tight">Latency</h2>
                 {latAvg != null && (
                   <span className="font-mono text-xs text-muted-foreground">
-                    Avg {latAvg} ms{latMax != null ? ` · Peak ${latMax}` : ""}
+                    Avg {latAvg} ms{latMax != null ? ` · Peak ${latMax} ms` : ""}
                   </span>
                 )}
               </div>
@@ -407,7 +424,9 @@ export default function App() {
         </div>
 
         {/* Notifications + outages (left column) | data & tools (right column).
-            Columns stretch to equal height so the Outages card bottom-aligns with Data & tools. */}
+            The columns stretch to one shared height so both card bottoms always sit on the
+            same line: the Outages card grows to absorb the difference, its pagination footer
+            pins to the bottom (mt-auto), and the page size caps how tall the list can get. */}
         <div className="grid grid-cols-1 items-stretch gap-4 lg:grid-cols-[1.7fr_1fr]">
           <div className="flex flex-col gap-4">
             {meta && (
@@ -457,7 +476,7 @@ export default function App() {
                           <InfoTip label={hint}>
                             <span className="border-b border-dotted border-muted-foreground/40 text-muted-foreground">{label}</span>
                           </InfoTip>
-                          {control ?? <span className="text-right font-mono text-foreground/80">{value}</span>}
+                          {control ?? <span className="text-right font-mono text-foreground">{value}</span>}
                         </div>
                       ))}
                     </div>
@@ -472,10 +491,10 @@ export default function App() {
                 <div className="space-y-0.5 text-xs">
                   {meta.resolvers.map((ip) => (
                     <div key={ip} className="-mx-2 flex items-center justify-between gap-3 rounded-md px-2 py-1 transition-colors hover:bg-muted/40">
-                      <InfoTip label="A public DNS resolver the monitor queries to confirm name resolution. DNS is tracked as its own signal and never counts as connectivity downtime.">
+                      <InfoTip label="A public DNS resolver the monitor queries to confirm name resolution. A confirmed DNS failure counts as downtime, tracked as its own kind.">
                         <span className="border-b border-dotted border-muted-foreground/40 text-muted-foreground">{resolverName(ip)}</span>
                       </InfoTip>
-                      <span className="text-right font-mono text-foreground/80">{ip}</span>
+                      <span className="text-right font-mono text-foreground">{ip}</span>
                     </div>
                   ))}
                 </div>
@@ -498,9 +517,6 @@ export default function App() {
                   {meta?.paused ? <><Play className="size-4" />Resume</> : <><Pause className="size-4" />Pause</>}
                 </Button>
               </InfoTip>
-              <InfoTip focusable={false} className="min-w-[7rem] flex-1" label="Permanently erase all recorded data. This cannot be undone.">
-                <Button variant="destructive" size="sm" className="w-full" onClick={() => setResetOpen(true)}><Trash2 className="size-4" />Reset</Button>
-              </InfoTip>
             </div>
             {/* Timed-pause helpers / resume countdown */}
             {meta?.paused ? (
@@ -518,6 +534,15 @@ export default function App() {
                 ))}
               </div>
             )}
+            {/* Destructive action demoted to a quiet text button: the rarest action on the
+                page should be the least prominent, not a full-width filled CTA. */}
+            <div className="mt-3 border-t border-border/40 pt-2">
+              <Button variant="ghost" size="sm"
+                className="h-7 px-2 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
+                onClick={() => setResetOpen(true)}>
+                <Trash2 className="size-3.5" />Reset all data
+              </Button>
+            </div>
           </Card>
         </div>
 

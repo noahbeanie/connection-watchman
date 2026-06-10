@@ -42,6 +42,7 @@ export interface Live {
   now: number; latest_ts?: number; latency_ms?: number | null
   dns_ok?: boolean | null
   streak_seconds?: number; streak_h?: string; interval: number
+  db_size_bytes?: number
 }
 export interface Target { host: string; port: number }
 export interface AlertConfig { type: string; url: string; recovery: boolean; dns: boolean }

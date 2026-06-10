@@ -24,7 +24,7 @@ export function OutagesTimeline({ outages, onSaveNote, onDelete }: {
   return (
     <>
       {/* column headers */}
-      <div className="mb-2 ml-1 flex justify-between pl-5 text-[0.7rem] font-semibold uppercase tracking-wide text-muted-foreground/70">
+      <div className="mb-2 ml-1 flex justify-between pl-5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         <span>Started</span>
         <span>Duration</span>
       </div>
@@ -42,11 +42,13 @@ export function OutagesTimeline({ outages, onSaveNote, onDelete }: {
               </div>
               <div className="mt-0.5 flex items-center justify-between gap-2 text-xs text-muted-foreground">
                 <div className="flex flex-wrap items-center gap-2">
+                  {/* The timeline dot carries the cause colour; the label stays neutral so the
+                      colour isn't triple-encoded (legend + dot + text). */}
                   <InfoTip label={CAUSE_DESC[o.cause] ?? CAUSE_DESC.unknown} className="cursor-help">
-                    <span className="font-medium" style={{ color: c }}>{CAUSE_LABEL[o.cause] ?? o.cause}</span>
+                    <span className="font-medium">{CAUSE_LABEL[o.cause] ?? o.cause}</span>
                   </InfoTip>
                   {o.ongoing ? (
-                    <span className="rounded-full px-2 py-0.5 text-[0.65rem] font-semibold"
+                    <span className="rounded-full px-2 py-0.5 text-xs font-semibold"
                       style={{ background: "color-mix(in oklab, var(--down) 18%, transparent)", color: "var(--down)" }}>
                       Ongoing
                     </span>
@@ -55,11 +57,18 @@ export function OutagesTimeline({ outages, onSaveNote, onDelete }: {
                   ) : null}
                 </div>
                 <div className="flex shrink-0 items-center gap-0.5">
-                  <button type="button" onClick={() => (editing ? setNoteId(null) : openNote(o))}
-                    title={o.note ? "Edit note" : "Add note"} aria-label={o.note ? "Edit note" : "Add note"}
-                    className={`rounded p-1 transition hover:bg-muted ${o.note ? "text-primary" : "text-muted-foreground hover:text-foreground"}`}>
-                    <StickyNote className="size-3.5" />
-                  </button>
+                  {/* The note lives in a hover tip on the icon (highlighted when one exists)
+                      instead of inline below the row: every entry stays the same height, so
+                      flipping between pages with and without notes can't shift the layout. */}
+                  <InfoTip focusable={false} label={o.note
+                    ? <><span className="font-semibold">Note</span><span className="mt-0.5 block italic text-muted-foreground">{o.note}</span></>
+                    : "Add a note to this outage (e.g. reset the modem)."}>
+                    <button type="button" onClick={() => (editing ? setNoteId(null) : openNote(o))}
+                      aria-label={o.note ? "Edit note" : "Add note"}
+                      className={`rounded p-1 transition hover:bg-muted ${o.note ? "text-primary" : "text-muted-foreground hover:text-foreground"}`}>
+                      <StickyNote className="size-3.5" />
+                    </button>
+                  </InfoTip>
                   {!o.ongoing && o.kind === "net" && (
                     <button type="button" onClick={() => { setNoteId(null); setConfirmId(confirming ? null : o.id) }}
                       title="Delete outage" aria-label="Delete outage"
@@ -69,10 +78,6 @@ export function OutagesTimeline({ outages, onSaveNote, onDelete }: {
                   )}
                 </div>
               </div>
-
-              {o.note && !editing && (
-                <p className="mt-1 rounded-md bg-muted/40 px-2 py-1 text-xs italic text-muted-foreground">{o.note}</p>
-              )}
 
               {editing && (
                 <div className="mt-1.5">

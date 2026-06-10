@@ -138,7 +138,7 @@ export function DateRangePicker({ firstTs, now, value, active, onApply }: {
               <ChevronRight className="size-4" />
             </button>
           </div>
-          <div className="mb-1 grid grid-cols-7 text-center text-[0.7rem] font-medium text-muted-foreground/70">
+          <div className="mb-1 grid grid-cols-7 text-center text-xs font-medium text-muted-foreground">
             {WD.map((w) => <span key={w} className="flex h-6 items-center justify-center">{w}</span>)}
           </div>
           <div className="grid grid-cols-7 gap-0.5" onMouseLeave={() => setHov(null)}>
@@ -164,7 +164,7 @@ export function DateRangePicker({ firstTs, now, value, active, onApply }: {
               )
             })}
           </div>
-          <p className="mt-2 text-center text-[0.7rem] text-muted-foreground">
+          <p className="mt-2 text-center text-xs text-muted-foreground">
             {!from ? "Pick a day" : !to ? "Click another day for a range" : fmtRangeShort(daySec(from), daySec(to))}
           </p>
         </div>,

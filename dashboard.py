@@ -42,7 +42,7 @@ PAUSE_FILE = os.path.join(BASE, "PAUSED")
 # User-adjustable settings persisted in the meta table (set via /api/config; the monitor
 # re-reads them live). Whitelisted so a bad value can never take effect.
 CFG_OPTIONS = {
-    "interval": (5, 10, 15, 30, 60),
+    "interval": (1, 5, 10, 15, 30, 60),
     "retention_days": (0, 30, 90, 180, 365),       # 0 = forever
     "outage_retention_days": (0, 90, 180, 365),    # 0 = forever
     "timeout_ms": (1000, 1500, 2000, 3000),        # response cutoff: answer within this or it's down
@@ -81,7 +81,7 @@ CONTENT_TYPES = {
     ".webmanifest": "application/manifest+json", ".txt": "text/plain; charset=utf-8",
 }
 
-NICE_BUCKETS = [60, 300, 900, 1800, 3600, 7200, 21600, 43200, 86400, 172800, 604800]
+NICE_BUCKETS = [1, 5, 10, 15, 30, 60, 300, 900, 1800, 3600, 7200, 21600, 43200, 86400, 172800, 604800]
 MAX_BUCKETS = 400
 
 
@@ -100,11 +100,26 @@ def db_rw():
     return conn
 
 
-def pick_bucket(window_seconds):
+def pick_bucket(window_seconds, min_bucket=1):
+    """Smallest nice bucket that keeps the series under MAX_BUCKETS points, floored at
+    min_bucket (the live check interval): a bucket finer than the check cadence would
+    leave most buckets empty and fragment the latency line into disconnected dots."""
     for b in NICE_BUCKETS:
+        if b < min_bucket:
+            continue
         if window_seconds / b <= MAX_BUCKETS:
             return b
     return NICE_BUCKETS[-1]
+
+
+def _db_size():
+    size = 0
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            size += os.path.getsize(DB_PATH + suffix)
+        except OSError:
+            pass
+    return size
 
 
 def fmt_dur(seconds):
@@ -224,7 +239,7 @@ def get_live(conn, now):
         "SELECT ts, up, latency_ms, dns FROM checks ORDER BY ts DESC LIMIT 1"
     ).fetchone()
     if latest is None:
-        return {"status": "nodata", "now": now, "interval": interval}
+        return {"status": "nodata", "now": now, "interval": interval, "db_size_bytes": _db_size()}
 
     age = now - latest["ts"]
     # headline status = raw connectivity only; DNS is a separate signal
@@ -268,6 +283,7 @@ def get_live(conn, now):
         "streak_seconds": streak_s,
         "streak_h": fmt_dur(streak_s),
         "interval": interval,
+        "db_size_bytes": _db_size(),   # rides the fast poll so the size reads near-live
     }
 
 
@@ -304,7 +320,7 @@ def build_range(conn, start, end):
     if end <= start:
         start = end - 1
     window = end - start
-    bucket = pick_bucket(window)
+    bucket = pick_bucket(window, max(1, cfg_get(conn, "interval")))
 
     # latency / sample summary
     s = conn.execute(
@@ -473,12 +489,7 @@ def pause_status():
 
 
 def build_meta(conn):
-    size = 0
-    for suffix in ("", "-wal", "-shm"):
-        try:
-            size += os.path.getsize(DB_PATH + suffix)
-        except OSError:
-            pass
+    size = _db_size()
     def m(k, d=None):
         try:
             row = conn.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()

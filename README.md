@@ -140,4 +140,6 @@ other traffic stays on the VPN.
 ## Storage
 
 At the default interval the check log grows ~15 MB/month and plateaus under ~200 MB (old rows
-trimmed hourly per the dashboard's retention setting). Outage and event history is kept forever.
+trimmed hourly per the dashboard's retention setting). The 1 s interval is great as a live
+troubleshooting view but logs ~15x the rows: budget ~225 MB/month, and consider a shorter
+retention if you leave it on. Outage and event history is kept forever.

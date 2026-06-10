@@ -255,17 +255,9 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
               onMouseEnter={() => openSeg(s, i)} onMouseLeave={scheduleClose}
               onFocus={() => openSeg(s, i)} onBlur={scheduleClose}
               aria-label={`${fmtTime(s.t, wd)}: ${pctText(s.pct)} uptime`}
-              className={`group relative h-full min-w-[2px] flex-1 overflow-hidden rounded-[3px] outline-none transition hover:opacity-100 hover:brightness-110 focus-visible:ring-2 focus-visible:ring-ring ${hot ? "z-10 opacity-100 brightness-125 ring-2 ring-inset ring-white/70" : "opacity-90"}`}
-              style={{
-                background: `linear-gradient(to bottom, color-mix(in oklab, ${c} 70%, white) 0%, ${c} 46%, color-mix(in oklab, ${c} 82%, black) 100%)`,
-                boxShadow: "inset 0 1px 0 0 rgba(255,255,255,0.25), inset 0 -1px 2px 0 rgba(0,0,0,0.30)",
-              }}
-            >
-              {/* glossy top sheen */}
-              <span className="pointer-events-none absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-white/30 via-white/5 to-transparent" />
-              {/* bottom inner shadow for depth */}
-              <span className="pointer-events-none absolute inset-x-0 bottom-0 h-2/5 bg-gradient-to-t from-black/25 to-transparent" />
-            </button>
+              className={`relative h-full min-w-[2px] flex-1 rounded-[3px] outline-none transition focus-visible:ring-2 focus-visible:ring-ring ${hot ? "z-10 brightness-125 ring-2 ring-inset ring-white/70" : "opacity-90 hover:opacity-100 hover:brightness-110"}`}
+              style={{ background: c }}
+            />
           )
         })}
       </div>
@@ -291,7 +283,7 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
             {partial ? (
               <div className="mt-1.5">
                 {mini && mini.key === activeSeg.t && mini.bars.length === 0 ? (
-                  <div className="flex h-7 items-center text-[0.7rem] text-muted-foreground/60">
+                  <div className="flex h-7 items-center text-xs text-muted-foreground">
                     No checks landed in this slice; shaded from the exact outage record.
                   </div>
                 ) : mini && mini.key === activeSeg.t ? (
@@ -309,7 +301,7 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
                       ))}
                     </div>
                     {/* per-bar time/status on hover; height reserved so the bars don't shift */}
-                    <div className="mt-1 h-4 text-[0.7rem]">
+                    <div className="mt-1 h-4 text-xs">
                       {miniHover != null && (
                         <>
                           <span className="font-mono text-muted-foreground">{fmtTime(mini.bars[miniHover].t, wd)}</span>{" "}
@@ -321,7 +313,7 @@ export function Tracker({ data, hoverT, onHoverT, fetchRange }: {
                     </div>
                   </>
                 ) : (
-                  <div className="flex h-7 items-center text-[0.7rem] text-muted-foreground/60">Loading breakdown</div>
+                  <div className="flex h-7 items-center text-xs text-muted-foreground">Loading breakdown</div>
                 )}
               </div>
             ) : info.paused ? (

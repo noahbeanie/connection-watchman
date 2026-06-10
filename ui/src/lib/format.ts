@@ -1,4 +1,6 @@
 export const PRESETS = [
+  // "5 MIN" spelled out: a "5M" chip next to "6M" (months) would be a minutes/months trap.
+  { id: "5min", label: "5 MIN", span: 300, word: "last 5 minutes" },
   { id: "1h", label: "1H", span: 3600, word: "last hour" },
   { id: "6h", label: "6H", span: 21600, word: "last 6 hours" },
   { id: "24h", label: "24H", span: 86400, word: "last 24 hours" },
@@ -91,14 +93,12 @@ export function fmtRangeShort(startSec: number, endSec: number): string {
   return `${mo(a)} ${a.getDate()}, ${a.getFullYear()} - ${mo(b)} ${b.getDate()}, ${b.getFullYear()}`
 }
 
-// Long, human "since" stamp for the header, e.g. "June 8, 2026 @ 1PM" (or "1:47PM" off the
-// hour). Minutes are shown only when non-zero so an on-the-hour start reads cleanly.
+// Human "since" stamp for the header, e.g. "Jun 8, 2026, 1:47 PM".
 export function fmtSince(ts: number): string {
   const d = new Date(ts * 1000)
-  const date = d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })
-  const h = d.getHours()
-  const min = d.getMinutes()
-  return `${date} @ ${h % 12 || 12}${min ? ":" + String(min).padStart(2, "0") : ""}${h < 12 ? "AM" : "PM"}`
+  const date = d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })
+  return `${date}, ${time}`
 }
 
 export function pctText(p: number | null): string {

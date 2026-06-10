@@ -35,11 +35,8 @@ export function StatCard({ icon: Icon, label, value, valueColor, accent, hint, c
       onFocus={(e) => show(e.currentTarget)}
       onBlur={() => setTip(null)}
     >
-      {/* soft accent glow, brightens on hover */}
-      <div
-        className="pointer-events-none absolute -right-8 -top-8 size-24 rounded-full opacity-50 blur-2xl transition-opacity duration-200 group-hover:opacity-90"
-        style={{ background: `color-mix(in oklab, ${a} 22%, transparent)` }}
-      />
+      {/* The icon chip carries the category colour; the value stays foreground so colour
+          remains information (state) rather than upholstery. */}
       <span
         className="relative flex size-8 shrink-0 items-center justify-center rounded-lg"
         style={{ background: `color-mix(in oklab, ${a} 16%, transparent)`, color: a }}
@@ -48,7 +45,7 @@ export function StatCard({ icon: Icon, label, value, valueColor, accent, hint, c
       </span>
       <span className="relative text-sm font-medium text-muted-foreground">{label}</span>
       <span
-        className="relative ml-auto font-mono text-2xl font-bold tabular-nums tracking-tight whitespace-nowrap"
+        className="relative ml-auto text-xl font-semibold tabular-nums tracking-tight whitespace-nowrap"
         style={valueColor ? { color: valueColor } : undefined}
       >
         {value}

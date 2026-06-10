@@ -116,10 +116,9 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
   const pausedBands = data.gaps.filter((g) => g.kind === "paused").map((g) => clampSpan(g.start, g.end)).filter((b) => b.x2 > b.x1)
   const nodataBands = data.gaps.filter((g) => g.kind !== "paused").map((g) => clampSpan(g.start, g.end)).filter((b) => b.x2 > b.x1)
 
-  // Least-squares trend over the visible (clamped) line, colored by direction: rising latency
-  // (worse) is red, falling (better) is green, roughly flat is neutral amber.
+  // Least-squares trend over the visible (clamped) line. Drawn neutral: red/green already
+  // mean down/up elsewhere on this chart, so a colored trend would collide with them.
   let trend: { x0: number; y0: number; x1: number; y1: number } | null = null
-  let trendColor = "var(--amber)"
   const tv = series.filter((p): p is typeof p & { plot: number } => p.plot != null)
   if (tv.length >= 2) {
     const n = tv.length
@@ -131,9 +130,6 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
     const intercept = my - slope * mx
     const x0 = tv[0].t, x1 = tv[tv.length - 1].t
     trend = { x0, y0: slope * x0 + intercept, x1, y1: slope * x1 + intercept }
-    const delta = trend.y1 - trend.y0
-    const thresh = Math.max(8, my * 0.08)
-    trendColor = delta > thresh ? "var(--down)" : delta < -thresh ? "var(--up)" : "var(--amber)"
   }
 
   // Tooltip driven by the shared hovered time, so it shows whether the latency or
@@ -168,12 +164,6 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
           onMouseLeave={() => onHoverT?.(null)}
         >
           <defs>
-            {/* Y axis is reversed (fast on top): green at the top (fast), red at the bottom (slow). */}
-            <linearGradient id="latStroke" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="var(--up)" />
-              <stop offset="50%" stopColor="var(--amber)" />
-              <stop offset="100%" stopColor="var(--down)" />
-            </linearGradient>
             <linearGradient id="latFill" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="var(--lat-line)" stopOpacity={0.20} />
               <stop offset="100%" stopColor="var(--lat-line)" stopOpacity={0.02} />
@@ -196,8 +186,10 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
               )
             }}
           />
+          {/* Conventional orientation: 0 at the bottom, spikes point up (slower = higher),
+              like every other monitoring tool. Units live in the section header. */}
           <YAxis
-            reversed domain={[0, maxL]} width={34} tickLine={false} axisLine={false}
+            domain={[0, maxL]} width={34} tickLine={false} axisLine={false}
             tick={{ fontSize: 10, fontFamily: "var(--font-mono, monospace)" }}
             tickFormatter={(v) => `${v}`}
           />
@@ -222,12 +214,12 @@ export function LatencyChart({ data, hoverT, onHoverT }: {
           {trend && (
             <ReferenceLine
               segment={[{ x: trend.x0, y: trend.y0 }, { x: trend.x1, y: trend.y1 }]}
-              stroke={trendColor} strokeWidth={1.5} strokeDasharray="5 4" strokeOpacity={0.9}
+              stroke="var(--muted-foreground)" strokeWidth={1.5} strokeDasharray="5 4" strokeOpacity={0.7}
             />
           )}
           <Area
-            dataKey="plot" type="monotone" stroke="url(#latStroke)" strokeWidth={2.5}
-            fill="url(#latFill)" baseValue={maxL} connectNulls={false} isAnimationActive={false}
+            dataKey="plot" type="monotone" stroke="var(--lat-line)" strokeWidth={2}
+            fill="url(#latFill)" connectNulls={false} isAnimationActive={false}
           />
           {hoverT != null && (
             <ReferenceLine x={hoverT} stroke="var(--foreground)" strokeOpacity={0.55} strokeWidth={1} />

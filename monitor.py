@@ -66,7 +66,7 @@ RETENTION_DAYS = int(os.environ.get("UPTIME_RETENTION_DAYS", "365"))
 OUTAGE_RETENTION_DAYS = int(os.environ.get("UPTIME_OUTAGE_RETENTION_DAYS", "0"))  # 0 = forever
 # User-adjustable settings (persisted in meta by the dashboard, re-read each cycle).
 # Whitelisted so a bad value can never break the loop.
-CFG_INTERVAL_OPTIONS = (5, 10, 15, 30, 60)
+CFG_INTERVAL_OPTIONS = (1, 5, 10, 15, 30, 60)
 CFG_RETENTION_OPTIONS = (0, 30, 90, 180, 365)
 CFG_OUTAGE_RETENTION_OPTIONS = (0, 90, 180, 365)
 # Response cutoff: a target must answer a TCP connect within this many ms or it doesn't count as
@@ -80,8 +80,9 @@ RETRY_GAP = float(os.environ.get("UPTIME_RETRY_GAP", "1.0"))   # seconds between
 PAUSE_FILE = os.path.join(BASE, "PAUSED")
 # Optional firewall mark applied to probe sockets so they BYPASS a policy-routed VPN on the host
 # and test the DIRECT path your other devices use (otherwise the probe measures the VPN tunnel, not
-# your ISP link). 0 = off (default; portable). When set (e.g. NordVPN's bypass mark 0xe1f1) the
-# service needs CAP_NET_ADMIN to apply SO_MARK. Parsed base-0 so "0x..." or decimal both work.
+# your ISP link). 0 = off (default; portable). When set (your VPN's bypass fwmark, found via
+# `ip rule show`) the service needs CAP_NET_ADMIN to apply SO_MARK. Parsed base-0 so "0x..." or
+# decimal both work.
 try:
     FWMARK = int(os.environ.get("UPTIME_FWMARK", "0") or "0", 0)
 except ValueError:

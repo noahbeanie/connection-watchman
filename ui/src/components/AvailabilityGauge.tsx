@@ -37,6 +37,7 @@ export function AvailabilityGauge({ pct, presetId }: { pct: number | null; prese
   return (
     <div
       className="relative mx-auto aspect-square w-full max-w-[230px]"
+      title="Excellent ≥ 99.5% · Good ≥ 98% · Fair ≥ 95% · Poor below 95%"
       onMouseEnter={() => setHov(true)}
       onMouseLeave={() => setHov(false)}
     >
@@ -44,7 +45,7 @@ export function AvailabilityGauge({ pct, presetId }: { pct: number | null; prese
       <div
         className="pointer-events-none absolute inset-0 rounded-full"
         style={{
-          background: `radial-gradient(circle at 50% 50%, transparent 58%, color-mix(in oklab, ${color} 32%, transparent) 74%, transparent 88%)`,
+          background: `radial-gradient(circle at 50% 50%, transparent 58%, color-mix(in oklab, ${color} 20%, transparent) 74%, transparent 88%)`,
           filter: "blur(7px)",
           opacity: frac > 0 ? 1 : 0,
         }}
@@ -76,7 +77,7 @@ export function AvailabilityGauge({ pct, presetId }: { pct: number | null; prese
         {/* wide soft bloom around the lit tube */}
         <circle cx="50" cy="50" r={R} fill="none" strokeWidth="8" strokeLinecap="round"
           strokeDasharray={C} strokeDashoffset={offset} filter="url(#neonBloom)"
-          style={{ stroke: color, opacity: 0.55 }} />
+          style={{ stroke: color, opacity: 0.3 }} />
         {/* tight inner glow */}
         <circle cx="50" cy="50" r={R} fill="none" strokeWidth="7" strokeLinecap="round"
           strokeDasharray={C} strokeDashoffset={offset} filter="url(#neonGlow)"
@@ -94,13 +95,13 @@ export function AvailabilityGauge({ pct, presetId }: { pct: number | null; prese
         <div className="flex w-[62%] flex-col items-center">
           <div
             className="font-mono text-4xl font-bold leading-none tabular-nums tracking-tight"
-            style={{ color, textShadow: `0 0 16px color-mix(in oklab, ${color} 55%, transparent)` }}
+            style={{ color, textShadow: `0 0 16px color-mix(in oklab, ${color} 28%, transparent)` }}
           >
             {pctText(pct)}
           </div>
           {grade && (
             <div
-              className="mt-1 text-[0.7rem] font-semibold uppercase tracking-wider"
+              className="mt-1 text-xs font-semibold uppercase tracking-wider"
               style={{ color: grade.color }}
             >
               {grade.label}
