@@ -142,6 +142,13 @@ so it never shows up as a latency spike or an outage. Failed attempts are record
 too (red dots on the chart baseline), and everything exports to CSV alongside checks and
 outages.
 
+**Optional Ookla engine:** if the official [Speedtest CLI](https://www.speedtest.net/apps/cli)
+(`speedtest`) is installed on the box, the monitor uses it automatically — speedtest.net's own
+servers and native multi-connection engine (saturates gigabit+ links), plus **jitter and packet
+loss** per test. Note that Ookla ignores the data cap: its tests adapt to the line, roughly
+1–2 GB per direction on fast links. Without the binary, the built-in zero-dependency engine
+above is used; if an Ookla run fails outright, the monitor falls back to it for that run.
+
 ## Custom targets (optional)
 
 "Up" means any target answered. Defaults are Cloudflare / Google / Quad9 on ports 443 and 53.

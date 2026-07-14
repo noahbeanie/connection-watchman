@@ -496,11 +496,18 @@ def build_speedtests(conn, start, end, now):
     shows the latest reading even when the selected range holds none) and the live
     settings, so the speed panel needs exactly one request. Tolerates a pre-migration
     DB whose monitor hasn't created the speedtests table yet."""
+    has_engine = _has_col(conn, "speedtests", "engine")   # False for a pre-ookla DB
+
     def j(r):
-        return {"ts": r["ts"], "down_bps": r["down_bps"], "up_bps": r["up_bps"],
-                "ping_ms": r["ping_ms"], "bytes_down": r["bytes_down"],
-                "bytes_up": r["bytes_up"], "error": r["error"]}
-    cols = "ts, down_bps, up_bps, ping_ms, bytes_down, bytes_up, error"
+        d = {"ts": r["ts"], "down_bps": r["down_bps"], "up_bps": r["up_bps"],
+             "ping_ms": r["ping_ms"], "bytes_down": r["bytes_down"],
+             "bytes_up": r["bytes_up"], "error": r["error"]}
+        if has_engine:
+            d.update({"jitter_ms": r["jitter_ms"], "loss_pct": r["loss_pct"],
+                      "engine": r["engine"]})
+        return d
+    cols = "ts, down_bps, up_bps, ping_ms, bytes_down, bytes_up, error" \
+        + (", jitter_ms, loss_pct, engine" if has_engine else "")
     tests, latest, last_error = [], None, None
     try:
         tests = [j(r) for r in conn.execute(
@@ -525,10 +532,17 @@ def build_speedtests(conn, start, end, now):
         pending = bool(r) and (now - int(float(r["v"] or 0))) < 180
     except (sqlite3.OperationalError, ValueError, TypeError):
         pass
+    # Which engine the NEXT test will use, so the panel can label itself and swap
+    # the data-use estimate (Ookla ignores the cap; its tests adapt to the line).
+    try:
+        import monitor as _mon
+        engine = "ookla" if _mon._ookla_available() else "http"
+    except Exception:
+        engine = "http"
     return {"start": start, "end": min(end, now), "now": now,
             "tests": tests, "latest": latest, "last_error": last_error, "pending": pending,
             "period_h": cfg_get(conn, "speedtest_period_h"),
-            "cap_mb": cfg_get(conn, "speedtest_cap_mb")}
+            "cap_mb": cfg_get(conn, "speedtest_cap_mb"), "engine": engine}
 
 
 def pause_status():
@@ -822,35 +836,41 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     SPEEDTEST_CSV_HEADER = ("timestamp_utc,timestamp_local,download_mbps,upload_mbps,"
-                            "ping_ms,bytes_downloaded,bytes_uploaded,error")
+                            "ping_ms,jitter_ms,packet_loss_pct,bytes_downloaded,"
+                            "bytes_uploaded,engine,error")
 
     def _export_speedtests(self, start, end):
         conn = db()
         try:
             has = conn.execute("SELECT name FROM sqlite_master WHERE type='table' "
                                "AND name='speedtests'").fetchone()
+            has_engine = bool(has) and _has_col(conn, "speedtests", "engine")
         finally:
             conn.close()
         if not has:   # pre-migration DB: a valid, empty CSV instead of a 500
             self._send(200, self.SPEEDTEST_CSV_HEADER + "\n", "text/csv; charset=utf-8")
             return
+        cols = "ts, down_bps, up_bps, ping_ms, bytes_down, bytes_up, error" \
+            + (", jitter_ms, loss_pct, engine" if has_engine else "")
 
         def fmt(r):
             down = "" if r["down_bps"] is None else f'{r["down_bps"] / 1e6:.2f}'
             up = "" if r["up_bps"] is None else f'{r["up_bps"] / 1e6:.2f}'
             ping = "" if r["ping_ms"] is None else f'{r["ping_ms"]:.1f}'
+            jitter = "" if not has_engine or r["jitter_ms"] is None else f'{r["jitter_ms"]:.1f}'
+            loss = "" if not has_engine or r["loss_pct"] is None else f'{r["loss_pct"]:.2f}'
+            engine = (r["engine"] or "http") if has_engine else "http"
             err = r["error"] or ""
             if err[:1] in ("=", "+", "-", "@", "\t"):
                 err = "'" + err            # neutralize spreadsheet formula injection
             err = err.replace('"', '""').replace("\n", " ").replace("\r", " ")
-            return (f'{iso(r["ts"])},{iso_local(r["ts"])},{down},{up},{ping},'
-                    f'{r["bytes_down"] or 0},{r["bytes_up"] or 0},"{err}"\n')
+            return (f'{iso(r["ts"])},{iso_local(r["ts"])},{down},{up},{ping},{jitter},{loss},'
+                    f'{r["bytes_down"] or 0},{r["bytes_up"] or 0},{engine},"{err}"\n')
 
         self._stream_csv(
             f"speedtests_{csv_range_label(start, end)}.csv",
             self.SPEEDTEST_CSV_HEADER,
-            "SELECT ts, down_bps, up_bps, ping_ms, bytes_down, bytes_up, error "
-            "FROM speedtests WHERE ts>=? AND ts<? ORDER BY ts",
+            f"SELECT {cols} FROM speedtests WHERE ts>=? AND ts<? ORDER BY ts",
             (start, end), fmt,
         )
 

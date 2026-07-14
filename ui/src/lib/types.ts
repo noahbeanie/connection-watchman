@@ -47,8 +47,10 @@ export interface Live {
 export interface SpeedTest {
   ts: number
   down_bps: number | null; up_bps: number | null; ping_ms: number | null
+  jitter_ms?: number | null; loss_pct?: number | null   // Ookla engine only
   bytes_down: number; bytes_up: number
   error: string | null
+  engine?: string | null         // "ookla" | "http" (absent on pre-ookla rows)
 }
 export interface SpeedData {
   start: number; end: number; now: number
@@ -57,6 +59,7 @@ export interface SpeedData {
   last_error: SpeedTest | null   // set when the newest attempt failed
   pending: boolean               // a queued run-now request the monitor hasn't consumed
   period_h: number; cap_mb: number
+  engine?: "ookla" | "http"      // which engine the NEXT test will use
 }
 export interface Target { host: string; port: number }
 export interface AlertConfig { type: string; url: string; recovery: boolean; dns: boolean }

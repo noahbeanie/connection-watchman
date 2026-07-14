@@ -104,6 +104,12 @@ CFG_SPEEDTEST_CAP_OPTIONS = (25, 50, 100, 250, 500)   # MB per direction per tes
 SPEEDTEST_PERIOD_DEFAULT = int(os.environ.get("UPTIME_SPEEDTEST_PERIOD_H", "0") or 0)
 SPEEDTEST_CAP_DEFAULT = int(os.environ.get("UPTIME_SPEEDTEST_CAP_MB", "100") or 100)
 SPEEDTEST_HOST = os.environ.get("UPTIME_SPEEDTEST_HOST", "speed.cloudflare.com")
+# Preferred engine: the official Ookla Speedtest CLI, used automatically when its
+# binary is installed (same infrastructure as speedtest.net; a native multi-connection
+# engine that saturates fast links a pure-Python loop can't, and adds jitter + packet
+# loss). Not bundled - the built-in HTTP engine below keeps the zero-dependency
+# promise, and everything works without it.
+SPEEDTEST_BIN = os.environ.get("UPTIME_SPEEDTEST_BIN", "speedtest")
 # Stream counts are ASYMMETRIC on purpose. Cloudflare's __down endpoint 403s
 # concurrent downloads from one IP (its abuse protection; their own client measures
 # sequentially), and a single download stream saturates any link this box can
@@ -669,8 +675,8 @@ def run_speedtest(cap_mb, streams=None, seconds=None):
     cycles, so a probe can never be measured through the test's own congestion."""
     streams = streams or SPEEDTEST_STREAMS
     seconds = seconds or SPEEDTEST_SECONDS
-    res = {"down_bps": None, "up_bps": None, "ping_ms": None,
-           "bytes_down": 0, "bytes_up": 0, "error": None}
+    res = {"down_bps": None, "up_bps": None, "ping_ms": None, "jitter_ms": None,
+           "loss_pct": None, "bytes_down": 0, "bytes_up": 0, "error": None, "engine": "http"}
     try:
         res["ping_ms"] = _st_ping()
     except Exception as e:
@@ -693,6 +699,56 @@ def run_speedtest(cap_mb, streams=None, seconds=None):
     return res
 
 
+def _ookla_available():
+    import shutil
+    return shutil.which(SPEEDTEST_BIN) is not None
+
+
+def _ookla_parse(text):
+    """Result dict from the Ookla CLI's --format=json output. Its `bandwidth` fields
+    are BYTES per second. A first-run license banner can precede the JSON, so parsing
+    starts at the first brace."""
+    data = json.loads(text[text.find("{"):])
+    dl = data.get("download") or {}
+    ul = data.get("upload") or {}
+    ping = data.get("ping") or {}
+    loss = data.get("packetLoss")
+
+    def bps(d):
+        b = d.get("bandwidth")
+        return float(b) * 8.0 if b else None
+
+    return {
+        "down_bps": bps(dl), "up_bps": bps(ul),
+        "ping_ms": round(float(ping["latency"]), 1) if ping.get("latency") is not None else None,
+        "jitter_ms": round(float(ping["jitter"]), 1) if ping.get("jitter") is not None else None,
+        "loss_pct": round(float(loss), 2) if loss is not None else None,
+        "bytes_down": int(dl.get("bytes") or 0), "bytes_up": int(ul.get("bytes") or 0),
+        "error": None, "engine": "ookla",
+    }
+
+
+def run_speedtest_ookla(timeout_s=45):
+    """Measure via the official Ookla Speedtest CLI. Same result shape as
+    run_speedtest(); never raises. The license flags are idempotent. Bounded by
+    timeout_s so a hung run stays inside the monitor's gap threshold. NOTE: Ookla
+    ignores the data cap - its tests adapt to the line (about 1-2 GB per direction
+    on fast links)."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            [SPEEDTEST_BIN, "--accept-license", "--accept-gdpr", "--format=json"],
+            capture_output=True, text=True, timeout=timeout_s)
+        if out.returncode != 0:
+            msg = (out.stderr or out.stdout or "").strip().replace("\n", " ")
+            raise RuntimeError(msg[:200] or f"exit code {out.returncode}")
+        return _ookla_parse(out.stdout)
+    except Exception as e:
+        return {"down_bps": None, "up_bps": None, "ping_ms": None, "jitter_ms": None,
+                "loss_pct": None, "bytes_down": 0, "bytes_up": 0,
+                "error": f"ookla: {e}"[:300], "engine": "ookla"}
+
+
 def speedtest_due(conn, now):
     """(due, manual). A run is due when the dashboard queued a run-now request (works
     even with scheduled tests off), or the configured period has elapsed since the last
@@ -711,24 +767,39 @@ def speedtest_due(conn, now):
 
 
 def run_speedtest_cycle(conn, manual):
-    """One scheduled/requested speed test: measure, record the row, advance the
-    schedule, consume any run-now request, and commit."""
+    """One scheduled/requested speed test: measure (Ookla CLI when installed, else the
+    built-in HTTP engine), record the row, advance the schedule, consume any run-now
+    request, and commit."""
     now = _now()
     cap = cfg_speedtest_cap_mb(conn)
+    use_ookla = _ookla_available()
     print(f"[{datetime.now(timezone.utc).isoformat()}] speed test starting "
-          f"({'requested' if manual else 'scheduled'}, cap {cap} MB/direction)", flush=True)
-    res = run_speedtest(cap)
+          f"({'requested' if manual else 'scheduled'}, engine {'ookla' if use_ookla else 'http'})", flush=True)
+    t0 = time.monotonic()
+    res = run_speedtest_ookla() if use_ookla else None
+    if res is not None and res["down_bps"] is None and res["up_bps"] is None:
+        if time.monotonic() - t0 < 10.0:
+            # Fast failure (missing server list, broken binary): fall back to the
+            # built-in engine so scheduled data keeps flowing.
+            print(f"[{datetime.now(timezone.utc).isoformat()}] ookla engine failed "
+                  f"({res['error']}); falling back to the built-in engine", flush=True)
+            res = None
+        # A slow ookla failure already spent the cycle's time budget: record it
+        # rather than stacking a second test on top and tripping gap detection.
+    if res is None:
+        res = run_speedtest(cap)
     conn.execute(
-        "INSERT INTO speedtests (ts, down_bps, up_bps, ping_ms, bytes_down, bytes_up, error) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (now, res["down_bps"], res["up_bps"], res["ping_ms"],
-         res["bytes_down"], res["bytes_up"], res["error"]),
+        "INSERT INTO speedtests (ts, down_bps, up_bps, ping_ms, jitter_ms, loss_pct, "
+        "bytes_down, bytes_up, error, engine) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (now, res["down_bps"], res["up_bps"], res["ping_ms"], res.get("jitter_ms"),
+         res.get("loss_pct"), res["bytes_down"], res["bytes_up"], res["error"],
+         res.get("engine", "http")),
     )
     meta_set(conn, "speedtest_last_ts", now)
     conn.execute("DELETE FROM meta WHERE k='speedtest_request'")
     conn.commit()
     mbps = lambda v: "-" if v is None else f"{v / 1e6:.1f} Mbps"  # noqa: E731
-    print(f"[{datetime.now(timezone.utc).isoformat()}] speed test done: "
+    print(f"[{datetime.now(timezone.utc).isoformat()}] speed test done ({res['engine']}): "
           f"down {mbps(res['down_bps'])}, up {mbps(res['up_bps'])}, ping {res['ping_ms']} ms"
           + (f", error: {res['error']}" if res["error"] else ""), flush=True)
 
@@ -788,12 +859,19 @@ def init_db(conn):
             down_bps   REAL,
             up_bps     REAL,
             ping_ms    REAL,
+            jitter_ms  REAL,
+            loss_pct   REAL,
             bytes_down INTEGER,
             bytes_up   INTEGER,
-            error      TEXT
+            error      TEXT,
+            engine     TEXT
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_speedtests_ts ON speedtests(ts)")
+    # additive migrations for speedtests tables created before the ookla engine
+    _add_col(conn, "speedtests", "jitter_ms", "REAL")
+    _add_col(conn, "speedtests", "loss_pct", "REAL")
+    _add_col(conn, "speedtests", "engine", "TEXT")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS events (
             id     INTEGER PRIMARY KEY AUTOINCREMENT,

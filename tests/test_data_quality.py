@@ -357,6 +357,65 @@ class SpeedTestScheduleTest(unittest.TestCase):
         self.assertEqual(monitor.speedtest_due(conn, int(time.time())), (False, False))
 
 
+class OoklaEngineTest(unittest.TestCase):
+    SAMPLE = json.dumps({
+        "type": "result",
+        "ping": {"jitter": 0.84, "latency": 9.41},
+        "download": {"bandwidth": 117034133, "bytes": 1600381752, "elapsed": 13615},
+        "upload": {"bandwidth": 52084905, "bytes": 620971576, "elapsed": 12405},
+        "packetLoss": 0.5,
+        "server": {"name": "Test ISP", "location": "Nearby"},
+    })
+
+    def test_parse_converts_bandwidth_bytes_to_bits(self):
+        r = monitor._ookla_parse(self.SAMPLE)
+        self.assertAlmostEqual(r["down_bps"], 117034133 * 8.0)
+        self.assertAlmostEqual(r["up_bps"], 52084905 * 8.0)
+        self.assertEqual(r["ping_ms"], 9.4)
+        self.assertEqual(r["jitter_ms"], 0.8)
+        self.assertEqual(r["loss_pct"], 0.5)
+        self.assertEqual(r["engine"], "ookla")
+
+    def test_parse_skips_first_run_license_banner(self):
+        r = monitor._ookla_parse("License acceptance recorded.\n" + self.SAMPLE)
+        self.assertIsNotNone(r["down_bps"])
+
+    def test_cycle_records_ookla_row(self):
+        conn = fresh_conn()
+        orig_avail, orig_ookla = monitor._ookla_available, monitor.run_speedtest_ookla
+        monitor._ookla_available = lambda: True
+        monitor.run_speedtest_ookla = lambda timeout_s=45: monitor._ookla_parse(self.SAMPLE)
+        try:
+            monitor.run_speedtest_cycle(conn, manual=True)
+        finally:
+            monitor._ookla_available, monitor.run_speedtest_ookla = orig_avail, orig_ookla
+        row = conn.execute("SELECT engine, jitter_ms, loss_pct FROM speedtests").fetchone()
+        self.assertEqual(row["engine"], "ookla")
+        self.assertEqual(row["jitter_ms"], 0.8)
+        self.assertEqual(row["loss_pct"], 0.5)
+
+    def test_cycle_falls_back_to_http_on_fast_ookla_failure(self):
+        """A broken/missing-server ookla run must not kill scheduled data: the
+        built-in engine takes over within the same cycle."""
+        conn = fresh_conn()
+        fail = {"down_bps": None, "up_bps": None, "ping_ms": None, "jitter_ms": None,
+                "loss_pct": None, "bytes_down": 0, "bytes_up": 0,
+                "error": "ookla: exit code 1", "engine": "ookla"}
+        ok = {"down_bps": 5e8, "up_bps": 4e8, "ping_ms": 21.0, "jitter_ms": None,
+              "loss_pct": None, "bytes_down": 1, "bytes_up": 1, "error": None, "engine": "http"}
+        origs = (monitor._ookla_available, monitor.run_speedtest_ookla, monitor.run_speedtest)
+        monitor._ookla_available = lambda: True
+        monitor.run_speedtest_ookla = lambda timeout_s=45: fail
+        monitor.run_speedtest = lambda cap: ok
+        try:
+            monitor.run_speedtest_cycle(conn, manual=False)
+        finally:
+            monitor._ookla_available, monitor.run_speedtest_ookla, monitor.run_speedtest = origs
+        row = conn.execute("SELECT engine, down_bps FROM speedtests").fetchone()
+        self.assertEqual(row["engine"], "http")
+        self.assertEqual(row["down_bps"], 5e8)
+
+
 class SpeedTestApiTest(unittest.TestCase):
     def _insert(self, conn, ts, down=300e6, up=20e6, error=None):
         conn.execute("INSERT INTO speedtests (ts, down_bps, up_bps, ping_ms, bytes_down, "

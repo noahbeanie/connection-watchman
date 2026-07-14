@@ -142,6 +142,7 @@ export function SpeedPanel({ preset, customRange, periodLabel }: {
   const series = data
     ? data.tests.map((t) => ({
         t: t.ts, down: t.down_bps, up: t.up_bps, ping: t.ping_ms,
+        jitter: t.jitter_ms ?? null, loss: t.loss_pct ?? null,
         used: (t.bytes_down || 0) + (t.bytes_up || 0),
         fail: t.down_bps == null ? 0 : null,
         error: t.error,
@@ -238,7 +239,10 @@ export function SpeedPanel({ preset, customRange, periodLabel }: {
                               <span style={{ color: UP_COLOR }}>&uarr; {fmtBps(p.up)}</span>
                             </div>
                             <div className="text-muted-foreground">
-                              {p.ping != null ? `${p.ping} ms ping · ` : ""}{humanBytes(p.used)} transferred
+                              {p.ping != null ? `${p.ping} ms ping · ` : ""}
+                              {p.jitter != null ? `${p.jitter} ms jitter · ` : ""}
+                              {p.loss != null ? `${p.loss}% loss · ` : ""}
+                              {humanBytes(p.used)} transferred
                             </div>
                           </>
                         )}
@@ -298,18 +302,27 @@ export function SpeedPanel({ preset, customRange, periodLabel }: {
           </span>
         </InfoTip>
         <CfgSelect value={data?.period_h ?? 0} options={PERIOD_OPTS} onChange={(v) => setCfg("speedtest_period_h", v)} />
-        <InfoTip label="Most data a test may move in each direction. Bigger caps read fast lines more accurately (more of the test runs at full speed); smaller caps suit capped or metered plans." className="cursor-help">
+        <InfoTip label={data?.engine === "ookla"
+          ? "Only used by the built-in fallback engine. Tests currently run through the Ookla Speedtest CLI, which adapts its own transfer size to the line (roughly 1-2 GB per direction on fast links)."
+          : "Most data a test may move in each direction. Bigger caps read fast lines more accurately (more of the test runs at full speed); smaller caps suit capped or metered plans."} className="cursor-help">
           <span className="ml-3 mr-1 flex items-center gap-1 text-muted-foreground">
             Data cap
             <Info className="size-3 text-muted-foreground/60" />
           </span>
         </InfoTip>
         <CfgSelect value={data?.cap_mb ?? 100} options={CAP_OPTS} onChange={(v) => setCfg("speedtest_cap_mb", v)} />
-        {!off && data && (
+        {data?.engine === "ookla" ? (
+          <InfoTip label="The official Ookla Speedtest CLI is installed, so tests use speedtest.net's own servers and engine (with jitter and packet loss). Uninstall it and the monitor falls back to the built-in zero-dependency engine." className="cursor-help">
+            <span className="ml-1 flex items-center gap-1 text-muted-foreground">
+              Engine: Ookla
+              <Info className="size-3 text-muted-foreground/60" />
+            </span>
+          </InfoTip>
+        ) : !off && data ? (
           <span className="ml-1 text-muted-foreground">
             &le; ~{monthlyGB(data.period_h, data.cap_mb).toFixed(monthlyGB(data.period_h, data.cap_mb) >= 10 ? 0 : 1)} GB/mo
           </span>
-        )}
+        ) : null}
         <Button size="sm" variant="secondary" className="ml-auto" disabled={!data || data.pending} onClick={runNow}>
           <Gauge className="size-3.5" />{data?.pending ? "Running…" : "Test now"}
         </Button>
