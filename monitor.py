@@ -799,7 +799,7 @@ def run_speedtest_cycle(conn, manual):
     conn.execute("DELETE FROM meta WHERE k='speedtest_request'")
     conn.commit()
     mbps = lambda v: "-" if v is None else f"{v / 1e6:.1f} Mbps"  # noqa: E731
-    print(f"[{datetime.now(timezone.utc).isoformat()}] speed test done ({res['engine']}): "
+    print(f"[{datetime.now(timezone.utc).isoformat()}] speed test done ({res.get('engine', 'http')}): "
           f"down {mbps(res['down_bps'])}, up {mbps(res['up_bps'])}, ping {res['ping_ms']} ms"
           + (f", error: {res['error']}" if res["error"] else ""), flush=True)
 
