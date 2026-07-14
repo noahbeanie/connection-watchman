@@ -66,6 +66,13 @@ must also answer within the **response cutoff** (dashboard setting, default 1s),
 reachable-but-crawling link counts as down. TCP-connect is used over ICMP because it needs no
 root and isn't rate-limited. Latency is the connect that answered.
 
+**Speed** (optional, off by default): every few hours a speed test measures real download /
+upload throughput and ping against Cloudflare's speed endpoints (speed.cloudflare.com), using
+several parallel HTTPS streams — the same idea as speedtest.net, still pure stdlib. It runs
+*between* connectivity checks, so its deliberate link saturation can never register as an outage
+or a latency spike. Each test moves real data (up to a configurable cap per direction), which is
+why it's opt-in: enable and tune it from the dashboard's Speed panel.
+
 **DNS** is checked separately (only while the line is up): several unrelated well-known names are
 resolved via the system resolver, then directly against public resolvers. DNS counts as down only
 when every name fails on every path, so one flaky forwarder or one zone's bad day is never logged
@@ -92,6 +99,8 @@ so they never inflate or deflate the number. Outage history is exact, not bucket
 - **Latency chart** colored green to red by speed, with bands marking outages (red), no-data (grey), and paused (blue).
 - **Status-page tracker**: per-slice up / partial / down / no-data; hover for cause and latency.
 - **KPI tiles**: current uptime streak, downtime, outage count, and DNS outages.
+- **Speed panel**: download / upload / ping over time for the range (failed tests marked on the
+  baseline), a run-now button, and the schedule + data-cap settings.
 - **Outage log** for the range (paginated), each entry labeled by kind (ISP, your network, DNS).
 - **Range presets**: a LIVE rolling two-minute view (refreshed every second), then a ladder
   from 15 minutes to a year plus All, and a custom date range or single day.
@@ -109,6 +118,27 @@ the internet comes back, with the downtime and cause. (A recovery alert is alway
 - **Webhook**: any endpoint; receives `{"title", "message"}` as JSON.
 
 Hit **Test** to send a sample.
+
+## Speed tests (optional)
+
+The **Speed** panel tracks what you're actually getting for what you pay for. Turn it on by
+picking a schedule (every 4h to daily); each run measures download, upload, and ping with
+parallel HTTPS streams against `speed.cloudflare.com`, and results chart over any range —
+so a line that's slowly degrading, or only slow every evening, becomes visible the same way
+outages are. **Test now** runs a one-off reading anytime (works with scheduling off).
+
+Two knobs, both on the panel:
+
+- **Test every** — how often. The panel shows the worst-case monthly data use for the
+  current settings (e.g. every 8h at a 100 MB cap ≤ ~18 GB/month).
+- **Data cap** — the most a test may move per direction. Bigger caps read fast lines more
+  accurately (more of the test runs beyond TCP slow start); smaller caps suit metered plans.
+  Tests are also time-bounded (~8s per direction), so slow lines use far less than the cap.
+
+A test saturates the link for ~20 seconds on purpose. It runs between connectivity checks,
+so it never shows up as a latency spike or an outage. Failed attempts are recorded and shown
+too (red dots on the chart baseline), and everything exports to CSV alongside checks and
+outages.
 
 ## Custom targets (optional)
 
@@ -151,5 +181,5 @@ are thinned hourly to one per 15 s; rows recording a failure are **never** thinn
 evidence keeps full fidelity forever. Long-term growth therefore stays near the 15 s rate
 (about 6 MB/month, measured) even at 1 s checks, and rows past the retention setting are
 trimmed entirely.
-Outage and event history is kept forever. Tune with `UPTIME_COMPACT_AFTER_DAYS` (0 disables
-thinning) and `UPTIME_COMPACT_GRID` (seconds).
+Outage and event history is kept forever, as are speed-test results (a few tiny rows per day).
+Tune with `UPTIME_COMPACT_AFTER_DAYS` (0 disables thinning) and `UPTIME_COMPACT_GRID` (seconds).

@@ -8,8 +8,11 @@ log written by monitor.py and serves:
   - "/api/live"               lightweight current status (polled often, cheap)
   - "/api/range?start=&end="  summary + timeline + buckets + outages for a window
   - "/api/meta"               first record, db size, paused state, retention, gateway
+  - "/api/speedtests?start=&end="  speed-test history for a window + latest + settings
   - "/api/export/checks.csv"  streamed raw check log (range or all-time)
   - "/api/export/outages.csv" streamed outage log
+  - "/api/export/speedtests.csv"   streamed speed-test log
+  - POST "/api/speedtest/run" queues a run-now speed test (the monitor runs it)
   - POST "/api/pause"         {paused: bool, minutes?: int} -> toggles the PAUSED sentinel
   - POST "/api/reset"         {confirm:"RESET"} -> wipes the database (guarded)
   - POST "/api/config"        {interval?, retention_days?, timeout_ms?, ...} -> live settings
@@ -46,9 +49,13 @@ CFG_OPTIONS = {
     "retention_days": (0, 30, 90, 180, 365),       # 0 = forever
     "outage_retention_days": (0, 90, 180, 365),    # 0 = forever
     "timeout_ms": (1000, 1500, 2000, 3000),        # response cutoff: answer within this or it's down
+    "speedtest_period_h": (0, 4, 6, 8, 12, 24),    # hours between speed tests; 0 = off
+    "speedtest_cap_mb": (25, 50, 100, 250, 500),   # MB per direction per speed test
 }
 CFG_DEFAULT = {"interval": INTERVAL, "retention_days": RETENTION_DAYS,
-               "outage_retention_days": OUTAGE_RETENTION_DAYS, "timeout_ms": 1000}
+               "outage_retention_days": OUTAGE_RETENTION_DAYS, "timeout_ms": 1000,
+               "speedtest_period_h": int(os.environ.get("UPTIME_SPEEDTEST_PERIOD_H", "0") or 0),
+               "speedtest_cap_mb": int(os.environ.get("UPTIME_SPEEDTEST_CAP_MB", "100") or 100)}
 
 ALERT_TYPES = ("discord", "webhook")
 # Host label for a custom target: a DNS hostname or IPv4 (no schemes, paths, or spaces).
@@ -484,6 +491,46 @@ def build_range(conn, start, end):
     }
 
 
+def build_speedtests(conn, start, end, now):
+    """Speed-test rows in the window, plus the newest result overall (the panel header
+    shows the latest reading even when the selected range holds none) and the live
+    settings, so the speed panel needs exactly one request. Tolerates a pre-migration
+    DB whose monitor hasn't created the speedtests table yet."""
+    def j(r):
+        return {"ts": r["ts"], "down_bps": r["down_bps"], "up_bps": r["up_bps"],
+                "ping_ms": r["ping_ms"], "bytes_down": r["bytes_down"],
+                "bytes_up": r["bytes_up"], "error": r["error"]}
+    cols = "ts, down_bps, up_bps, ping_ms, bytes_down, bytes_up, error"
+    tests, latest, last_error = [], None, None
+    try:
+        tests = [j(r) for r in conn.execute(
+            f"SELECT {cols} FROM speedtests WHERE ts>=? AND ts<? ORDER BY ts", (start, end))]
+        # latest = newest USABLE reading: one transient failure must not blank the
+        # header until the next scheduled run. A failed newest attempt is surfaced
+        # separately so it is still visible, never silently swallowed.
+        row = conn.execute(f"SELECT {cols} FROM speedtests WHERE down_bps IS NOT NULL "
+                           "ORDER BY ts DESC LIMIT 1").fetchone()
+        latest = j(row) if row else None
+        newest = conn.execute(f"SELECT {cols} FROM speedtests ORDER BY ts DESC LIMIT 1").fetchone()
+        if newest is not None and newest["error"] and (latest is None or newest["ts"] > latest["ts"]):
+            last_error = j(newest)
+    except sqlite3.OperationalError:
+        pass
+    # A queued run-now request the monitor hasn't consumed yet drives the UI's
+    # "Running..." state; it goes stale after 3 minutes so a stopped monitor can't
+    # leave the button stuck forever.
+    pending = False
+    try:
+        r = conn.execute("SELECT v FROM meta WHERE k='speedtest_request'").fetchone()
+        pending = bool(r) and (now - int(float(r["v"] or 0))) < 180
+    except (sqlite3.OperationalError, ValueError, TypeError):
+        pass
+    return {"start": start, "end": min(end, now), "now": now,
+            "tests": tests, "latest": latest, "last_error": last_error, "pending": pending,
+            "period_h": cfg_get(conn, "speedtest_period_h"),
+            "cap_mb": cfg_get(conn, "speedtest_cap_mb")}
+
+
 def pause_status():
     """(paused: bool, pause_until: int|None) from the sentinel file. An empty file is an
     indefinite pause; a numeric file is a timed pause (reported until it elapses, after
@@ -667,6 +714,14 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     conn.close()
 
+            elif path == "/api/speedtests":
+                conn = db()
+                try:
+                    start, end = self._resolve_range(q, conn, now)
+                    self._send(200, json.dumps(build_speedtests(conn, start, end, now)), "application/json")
+                finally:
+                    conn.close()
+
             elif path == "/api/export/checks.csv":
                 conn = db()
                 try:
@@ -682,6 +737,14 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     conn.close()
                 self._export_outages(start, end)
+
+            elif path == "/api/export/speedtests.csv":
+                conn = db()
+                try:
+                    start, end = self._resolve_range(q, conn, now)
+                finally:
+                    conn.close()
+                self._export_speedtests(start, end)
 
             else:
                 self._serve_static(path)
@@ -756,6 +819,39 @@ class Handler(BaseHTTPRequestHandler):
             f"SELECT id, start_ts, end_ts, duration_s, {cause_sel}, {kind_sel}, {note_sel} FROM outages "
             f"WHERE start_ts < ? AND (end_ts IS NULL OR end_ts >= ?){kind_where} ORDER BY start_ts",
             (end, start), fmt,
+        )
+
+    SPEEDTEST_CSV_HEADER = ("timestamp_utc,timestamp_local,download_mbps,upload_mbps,"
+                            "ping_ms,bytes_downloaded,bytes_uploaded,error")
+
+    def _export_speedtests(self, start, end):
+        conn = db()
+        try:
+            has = conn.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                               "AND name='speedtests'").fetchone()
+        finally:
+            conn.close()
+        if not has:   # pre-migration DB: a valid, empty CSV instead of a 500
+            self._send(200, self.SPEEDTEST_CSV_HEADER + "\n", "text/csv; charset=utf-8")
+            return
+
+        def fmt(r):
+            down = "" if r["down_bps"] is None else f'{r["down_bps"] / 1e6:.2f}'
+            up = "" if r["up_bps"] is None else f'{r["up_bps"] / 1e6:.2f}'
+            ping = "" if r["ping_ms"] is None else f'{r["ping_ms"]:.1f}'
+            err = r["error"] or ""
+            if err[:1] in ("=", "+", "-", "@", "\t"):
+                err = "'" + err            # neutralize spreadsheet formula injection
+            err = err.replace('"', '""').replace("\n", " ").replace("\r", " ")
+            return (f'{iso(r["ts"])},{iso_local(r["ts"])},{down},{up},{ping},'
+                    f'{r["bytes_down"] or 0},{r["bytes_up"] or 0},"{err}"\n')
+
+        self._stream_csv(
+            f"speedtests_{csv_range_label(start, end)}.csv",
+            self.SPEEDTEST_CSV_HEADER,
+            "SELECT ts, down_bps, up_bps, ping_ms, bytes_down, bytes_up, error "
+            "FROM speedtests WHERE ts>=? AND ts<? ORDER BY ts",
+            (start, end), fmt,
         )
 
     def do_POST(self):
@@ -910,6 +1006,23 @@ class Handler(BaseHTTPRequestHandler):
                     conn.execute("DELETE FROM outages WHERE id=?", (oid,))
                     conn.execute("COMMIT")
                     self._send(200, json.dumps({"ok": True, "id": oid}), "application/json")
+                except sqlite3.OperationalError as e:
+                    self._send(503, json.dumps({"error": f"database busy: {e}"}), "application/json")
+                finally:
+                    conn.close()
+            elif parsed.path == "/api/speedtest/run":
+                # Queue a run-now request for the MONITOR to execute between check
+                # cycles. Running the test here would saturate the link while probes
+                # fire (contaminating readings) and block this handler ~30 seconds.
+                # Consumed by the monitor within one cycle; works with scheduling off.
+                conn = db_rw()
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute("INSERT INTO meta (k, v) VALUES ('speedtest_request', ?) "
+                                 "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                                 (str(int(time.time())),))
+                    conn.execute("COMMIT")
+                    self._send(200, json.dumps({"ok": True, "pending": True}), "application/json")
                 except sqlite3.OperationalError as e:
                     self._send(503, json.dumps({"error": f"database busy: {e}"}), "application/json")
                 finally:

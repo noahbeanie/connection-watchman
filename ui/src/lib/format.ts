@@ -113,6 +113,16 @@ export function pctText(p: number | null): string {
   return (p >= 99.995 ? "100" : p.toFixed(p >= 99.9 ? 3 : 2)) + "%"
 }
 
+// Human throughput from bits/s, speed-test scale: "457 Mbps", "23.4 Mbps", "1.02 Gbps".
+// Two significant digits of precision where it matters (small numbers), whole numbers
+// once the fraction stops meaning anything.
+export function fmtBps(bps: number | null | undefined): string {
+  if (bps == null) return "—"
+  if (bps >= 1e9) return (bps / 1e9).toFixed(2) + " Gbps"
+  if (bps >= 1e6) return (bps >= 100e6 ? Math.round(bps / 1e6).toString() : (bps / 1e6).toFixed(1)) + " Mbps"
+  return Math.max(0, Math.round(bps / 1e3)) + " Kbps"
+}
+
 export function humanBytes(n: number): string {
   if (!n) return "0 B"
   const u = ["B", "KB", "MB", "GB"]

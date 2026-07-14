@@ -23,6 +23,7 @@ import { DateRangePicker } from "@/components/DateRangePicker"
 import { AlertSettings } from "@/components/AlertSettings"
 import { TargetsPopover } from "@/components/TargetsPopover"
 import { ReportView } from "@/components/ReportView"
+import { SpeedPanel } from "@/components/SpeedPanel"
 import { InfoTip } from "@/components/InfoTip"
 import type { Live, Meta, RangeData } from "@/lib/types"
 import {
@@ -227,7 +228,11 @@ export default function App() {
     const { start, end } = preset === "custom" && customRange ? customRange : windowFor(preset)
     return `/api/export/${kind}.csv?start=${start}&end=${end}`
   }
-  const exportData = () => { download(exportUrl("checks")); setTimeout(() => download(exportUrl("outages")), 400) }
+  const exportData = () => {
+    download(exportUrl("checks"))
+    setTimeout(() => download(exportUrl("outages")), 400)
+    setTimeout(() => download(exportUrl("speedtests")), 800)
+  }
 
   const availSecs = meta?.first_ts ? nowSec() - meta.first_ts : 0
   const histMsg = availSecs > 0 ? `Only ${fmtDur(availSecs)} of history so far` : "No history recorded yet"
@@ -525,6 +530,9 @@ export default function App() {
             </Card>
           </div>
         </div>
+
+        {/* Full-width speed panel: scheduled speed-test history for the selected range. */}
+        <SpeedPanel preset={preset} customRange={customRange} periodLabel={periodLabel} />
 
         {/* Notifications + outages (left column) | data & tools (right column).
             The columns stretch to one shared height so both card bottoms always sit on the

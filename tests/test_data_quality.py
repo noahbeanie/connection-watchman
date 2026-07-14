@@ -274,5 +274,112 @@ class FirstRecordTest(unittest.TestCase):
         self.assertEqual(dashboard.first_record_ts(conn), now - 900000)
 
 
+class SpeedTestRateTest(unittest.TestCase):
+    """Rate math for the throughput measurement (no network involved)."""
+
+    def test_slow_start_ramp_skipped(self):
+        """A long test's rate comes from the post-ramp window: counting the first
+        second's TCP slow start would systematically under-read the line."""
+        samples = [(0.0, 0)]
+        b = 0
+        for i in range(1, 161):                 # 8s of 50ms ticks
+            t = i * 0.05
+            b += 50_000 if t <= 1.0 else 500_000    # 1 MB/s ramp, then 10 MB/s steady
+            samples.append((t, b))
+        rate = monitor._st_rate(samples)
+        self.assertAlmostEqual(rate, 10e6 * 8, delta=0.05 * 10e6 * 8)
+
+    def test_idle_tail_trimmed_when_cap_exhausted(self):
+        """Cap hit at 2s, sampling continues to 8s: the rate must reflect the 2s of
+        actual transfer, not average the idle tail into a 4x under-read."""
+        samples = [(0.0, 0)]
+        for i in range(1, 161):
+            t = i * 0.05
+            samples.append((t, min(20_000_000, int(10_000_000 * t))))
+        rate = monitor._st_rate(samples)
+        self.assertAlmostEqual(rate, 10e6 * 8, delta=0.05 * 10e6 * 8)
+
+    def test_none_when_nothing_transferred(self):
+        self.assertIsNone(monitor._st_rate([(0.0, 0), (1.0, 0), (2.0, 0)]))
+        self.assertIsNone(monitor._st_rate([(0.0, 0)]))
+
+
+class SpeedTestScheduleTest(unittest.TestCase):
+    def test_off_by_default(self):
+        conn = fresh_conn()
+        self.assertEqual(monitor.speedtest_due(conn, int(time.time())), (False, False))
+
+    def test_period_elapsed(self):
+        conn = fresh_conn()
+        now = int(time.time())
+        monitor.meta_set(conn, "cfg_speedtest_period_h", "8")
+        self.assertEqual(monitor.speedtest_due(conn, now), (True, False))   # never ran
+        monitor.meta_set(conn, "speedtest_last_ts", now - 3600)
+        self.assertEqual(monitor.speedtest_due(conn, now), (False, False))  # 1h ago
+        monitor.meta_set(conn, "speedtest_last_ts", now - 9 * 3600)
+        self.assertEqual(monitor.speedtest_due(conn, now), (True, False))   # 9h ago
+
+    def test_run_now_request_works_with_scheduling_off(self):
+        conn = fresh_conn()
+        now = int(time.time())
+        monitor.meta_set(conn, "speedtest_request", now)
+        self.assertEqual(monitor.speedtest_due(conn, now), (True, True))
+
+    def test_cycle_records_row_and_consumes_request(self):
+        """A run (even a failed one) must record a row, advance the schedule, and clear
+        the run-now request - otherwise an unreachable endpoint retries every cycle."""
+        conn = fresh_conn()
+        now = int(time.time())
+        monitor.meta_set(conn, "speedtest_request", now)
+        orig = monitor.run_speedtest
+        monitor.run_speedtest = lambda cap: {"down_bps": None, "up_bps": None, "ping_ms": None,
+                                             "bytes_down": 0, "bytes_up": 0, "error": "unreachable: test"}
+        try:
+            monitor.run_speedtest_cycle(conn, manual=True)
+        finally:
+            monitor.run_speedtest = orig
+        row = conn.execute("SELECT down_bps, error FROM speedtests").fetchone()
+        self.assertIsNone(row["down_bps"])
+        self.assertEqual(row["error"], "unreachable: test")
+        self.assertIsNone(monitor.meta_get(conn, "speedtest_request"))
+        self.assertIsNotNone(monitor.meta_get(conn, "speedtest_last_ts"))
+        self.assertEqual(monitor.speedtest_due(conn, int(time.time())), (False, False))
+
+
+class SpeedTestApiTest(unittest.TestCase):
+    def _insert(self, conn, ts, down=300e6, up=20e6, error=None):
+        conn.execute("INSERT INTO speedtests (ts, down_bps, up_bps, ping_ms, bytes_down, "
+                     "bytes_up, error) VALUES (?, ?, ?, 12.0, 1000, 1000, ?)",
+                     (ts, down, up, error))
+
+    def test_latest_survives_a_failed_newest_attempt(self):
+        """One transient failure must not blank the header until the next scheduled
+        run; the failure is surfaced separately, never silently swallowed."""
+        conn = fresh_conn()
+        now = int(time.time())
+        self._insert(conn, now - 3600)
+        self._insert(conn, now - 60, down=None, up=None, error="unreachable: x")
+        d = dashboard.build_speedtests(conn, now - 7200, now, now)
+        self.assertEqual(d["latest"]["ts"], now - 3600)
+        self.assertEqual(d["last_error"]["ts"], now - 60)
+        self.assertEqual(len(d["tests"]), 2)      # the range list still holds both
+
+    def test_pre_migration_db_tolerated(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT)")
+        d = dashboard.build_speedtests(conn, 0, int(time.time()), int(time.time()))
+        self.assertEqual(d["tests"], [])
+        self.assertIsNone(d["latest"])
+
+    def test_pending_reflects_queued_request_and_goes_stale(self):
+        conn = fresh_conn()
+        now = int(time.time())
+        conn.execute("INSERT INTO meta (k, v) VALUES ('speedtest_request', ?)", (str(now - 30),))
+        self.assertTrue(dashboard.build_speedtests(conn, 0, now, now)["pending"])
+        conn.execute("UPDATE meta SET v=? WHERE k='speedtest_request'", (str(now - 600),))
+        self.assertFalse(dashboard.build_speedtests(conn, 0, now, now)["pending"])
+
+
 if __name__ == "__main__":
     unittest.main()

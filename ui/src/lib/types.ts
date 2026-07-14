@@ -44,6 +44,20 @@ export interface Live {
   streak_seconds?: number; streak_h?: string; interval: number
   db_size_bytes?: number
 }
+export interface SpeedTest {
+  ts: number
+  down_bps: number | null; up_bps: number | null; ping_ms: number | null
+  bytes_down: number; bytes_up: number
+  error: string | null
+}
+export interface SpeedData {
+  start: number; end: number; now: number
+  tests: SpeedTest[]
+  latest: SpeedTest | null       // newest usable reading (any time, not just the range)
+  last_error: SpeedTest | null   // set when the newest attempt failed
+  pending: boolean               // a queued run-now request the monitor hasn't consumed
+  period_h: number; cap_mb: number
+}
 export interface Target { host: string; port: number }
 export interface AlertConfig { type: string; url: string; recovery: boolean; dns: boolean }
 export interface Meta {

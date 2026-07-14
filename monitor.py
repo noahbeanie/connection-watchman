@@ -29,6 +29,12 @@ downtime, kept as its own kind so a DNS outage is distinguishable from a line
 drop. DNS is only evaluated while connectivity is up (when the line is down,
 DNS fails too and is already covered by the connectivity outage).
 
+Optionally (off by default, enabled from the dashboard), a SPEED TEST runs every
+few hours: parallel HTTPS streams against Cloudflare's speed endpoints measure
+real download/upload throughput + ping, recorded to the speedtests table. It runs
+between check cycles so its deliberate link saturation can never contaminate a
+probe reading.
+
 Reboots / pauses create GAPS in the log; gaps are recorded as events and count
 as neither up nor down (so they can never inflate uptime). Storage is tiered:
 recent checks keep full resolution, older HEALTHY checks are thinned to a coarse
@@ -86,6 +92,20 @@ CFG_OUTAGE_RETENTION_OPTIONS = (0, 90, 180, 365)
 # Lower = stricter. Re-read live; whitelisted.
 CFG_TIMEOUT_OPTIONS = (1000, 1500, 2000, 3000)
 TIMEOUT_MS_DEFAULT = 1000
+# Scheduled speed test (opt-in, off by default): every N hours the monitor measures
+# real download/upload throughput + ping against Cloudflare's speed endpoints
+# (speed.cloudflare.com/__down and /__up), pure stdlib. Off by default because a
+# meaningful test moves real data - up to the cap PER DIRECTION per test - which
+# matters on capped/metered plans. The cap also bounds how long the link stays
+# saturated; a bigger cap reads fast lines more accurately (more time outside TCP
+# slow start). Both settings are dashboard-adjustable and whitelisted like the rest.
+CFG_SPEEDTEST_PERIOD_OPTIONS = (0, 4, 6, 8, 12, 24)   # hours between tests; 0 = off
+CFG_SPEEDTEST_CAP_OPTIONS = (25, 50, 100, 250, 500)   # MB per direction per test
+SPEEDTEST_PERIOD_DEFAULT = int(os.environ.get("UPTIME_SPEEDTEST_PERIOD_H", "0") or 0)
+SPEEDTEST_CAP_DEFAULT = int(os.environ.get("UPTIME_SPEEDTEST_CAP_MB", "100") or 100)
+SPEEDTEST_HOST = os.environ.get("UPTIME_SPEEDTEST_HOST", "speed.cloudflare.com")
+SPEEDTEST_STREAMS = max(1, int(os.environ.get("UPTIME_SPEEDTEST_STREAMS", "4")))
+SPEEDTEST_SECONDS = float(os.environ.get("UPTIME_SPEEDTEST_SECONDS", "8"))  # per direction
 CONFIRM_RETRIES = int(os.environ.get("UPTIME_CONFIRM_RETRIES", "3"))  # extra tries before "down"
 RETRY_GAP = float(os.environ.get("UPTIME_RETRY_GAP", "1.0"))   # seconds between confirm tries
 PAUSE_FILE = os.path.join(BASE, "PAUSED")
@@ -413,6 +433,266 @@ def classify_net_cause(gw):
     return "unknown"      # gateway unknown - don't guess
 
 
+# ---- speed test ---------------------------------------------------------------
+# Throughput is measured the way browser speed tests do it: several parallel HTTPS
+# streams against Cloudflare's public speed endpoints, counting bytes over a fixed
+# time window. Parallel streams matter: a single TLS stream tops out well below a
+# fast line's capacity (especially on a Pi), so one stream under-reads.
+def _st_sock(timeout, sndbuf=None):
+    """TCP+TLS socket to the speed-test host. Honors the VPN-bypass fwmark like every
+    other probe socket, so throughput is measured on the same path the checks watch."""
+    import ssl
+    last = None
+    for af, st, proto, _cn, sa in socket.getaddrinfo(SPEEDTEST_HOST, 443, type=socket.SOCK_STREAM):
+        s = socket.socket(af, st, proto)
+        try:
+            if FWMARK:
+                s.setsockopt(socket.SOL_SOCKET, SO_MARK, FWMARK)
+            if sndbuf:
+                # Small kernel send buffer so "bytes sent" tracks the wire: with the
+                # default buffer, megabytes count as sent while parked locally, which
+                # inflates the upload rate on slow uplinks.
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, sndbuf)
+            s.settimeout(timeout)
+            s.connect(sa)
+            ctx = ssl.create_default_context()
+            return ctx.wrap_socket(s, server_hostname=SPEEDTEST_HOST)
+        except OSError as e:
+            last = e
+            s.close()
+    raise last or OSError("getaddrinfo returned no addresses")
+
+
+def _st_read_headers(sock):
+    """Read one HTTP response's status line + headers; return (status, leftover bytes
+    already read past the blank line, i.e. the first body bytes)."""
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        chunk = sock.recv(1 << 16)
+        if not chunk:
+            raise OSError("connection closed before response headers")
+        buf += chunk
+        if len(buf) > 1 << 16:
+            raise OSError("oversized response headers")
+    head, _, body = buf.partition(b"\r\n\r\n")
+    try:
+        status = int(head.split(b" ", 2)[1])
+    except (IndexError, ValueError):
+        raise OSError("malformed status line")
+    return status, body
+
+
+def _st_ping(samples=5, timeout=3.0):
+    """Median request/response round trip for a zero-byte download over ONE reused
+    connection (the TLS handshake is paid once, not per sample): effectively ping plus
+    a sliver of server time, on the exact path the throughput test uses."""
+    sock = _st_sock(timeout)
+    try:
+        req = (f"GET /__down?bytes=0 HTTP/1.1\r\nHost: {SPEEDTEST_HOST}\r\n"
+               "User-Agent: ConnectionWatchman/1.0\r\n\r\n").encode("ascii")
+        times = []
+        for _ in range(samples):
+            t0 = time.monotonic()
+            sock.sendall(req)
+            status, _body = _st_read_headers(sock)
+            if status != 200:
+                raise OSError(f"HTTP {status}")
+            times.append((time.monotonic() - t0) * 1000.0)
+        times.sort()
+        return round(times[len(times) // 2], 1)
+    finally:
+        sock.close()
+
+
+def _st_down_worker(nbytes, deadline, add, errors):
+    """One download stream: a single big GET, counting body bytes as they arrive until
+    the response is complete or the deadline hits (the rest is abandoned)."""
+    try:
+        sock = _st_sock(2.0)
+    except Exception as e:
+        errors.append(f"down: {e}")
+        return
+    try:
+        sock.sendall((f"GET /__down?bytes={nbytes} HTTP/1.1\r\nHost: {SPEEDTEST_HOST}\r\n"
+                      "User-Agent: ConnectionWatchman/1.0\r\nConnection: close\r\n\r\n").encode("ascii"))
+        status, body = _st_read_headers(sock)
+        if status != 200:
+            raise OSError(f"HTTP {status}")
+        add(len(body))
+        while time.monotonic() < deadline:
+            try:
+                chunk = sock.recv(1 << 16)
+            except socket.timeout:
+                continue    # stalled: no bytes counted for the stall, which is the truth
+            if not chunk:
+                break       # response complete (per-stream share of the cap exhausted)
+            add(len(chunk))
+    except Exception as e:
+        errors.append(f"down: {e}")
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+_ST_BLOCK = os.urandom(1 << 16)   # one reusable 64 KiB block of incompressible payload
+
+
+def _st_up_worker(nbytes, deadline, add, errors):
+    """One upload stream: a single big POST streamed in small blocks, counting bytes as
+    the kernel accepts them, until done or the deadline (then the POST is abandoned;
+    the server just discards it)."""
+    try:
+        sock = _st_sock(5.0, sndbuf=1 << 17)
+    except Exception as e:
+        errors.append(f"up: {e}")
+        return
+    try:
+        sock.sendall((f"POST /__up HTTP/1.1\r\nHost: {SPEEDTEST_HOST}\r\n"
+                      "User-Agent: ConnectionWatchman/1.0\r\n"
+                      f"Content-Length: {nbytes}\r\nConnection: close\r\n\r\n").encode("ascii"))
+        sent = 0
+        while sent < nbytes and time.monotonic() < deadline:
+            block = _ST_BLOCK if nbytes - sent >= len(_ST_BLOCK) else _ST_BLOCK[:nbytes - sent]
+            try:
+                sock.sendall(block)
+            except socket.timeout:
+                break       # uplink too slow to move even one block per timeout
+            sent += len(block)
+            add(len(block))
+    except Exception as e:
+        errors.append(f"up: {e}")
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def _st_rate(samples):
+    """bits/s from (elapsed_s, total_bytes) samples. The first second is skipped when
+    the test ran long enough to afford it (TCP slow start reads as a falsely low rate),
+    and trailing samples after growth stopped are trimmed (cap exhausted before the
+    clock). Returns None when nothing usable transferred."""
+    end = len(samples) - 1
+    while end > 0 and samples[end - 1][1] == samples[end][1]:
+        end -= 1
+    t1, b1 = samples[end]
+    t0, b0 = samples[0]
+    if t1 > 3.0:
+        for t, b in samples:
+            if t >= 1.0:
+                t0, b0 = t, b
+                break
+    if t1 <= t0 or b1 <= b0:
+        return None
+    return (b1 - b0) * 8.0 / (t1 - t0)
+
+
+def _st_fanout(worker, per_stream, streams, seconds):
+    """Run `streams` copies of a transfer worker and sample the shared byte counter on
+    a fast tick. Returns (bps or None, total_bytes, errors). Bounded: workers time out
+    on their own sockets, and stragglers are abandoned (daemon threads) after a grace
+    period, so a hung stream can never wedge the monitor loop."""
+    lock = threading.Lock()
+    total = [0]
+
+    def add(n):
+        with lock:
+            total[0] += n
+
+    errors = []
+    deadline = time.monotonic() + seconds
+    threads = [threading.Thread(target=worker, args=(per_stream, deadline, add, errors), daemon=True)
+               for _ in range(streams)]
+    start = time.monotonic()
+    for th in threads:
+        th.start()
+    samples = [(0.0, 0)]
+    while _running:
+        time.sleep(0.05)
+        with lock:
+            b = total[0]
+        t = time.monotonic() - start
+        samples.append((t, b))
+        if not any(th.is_alive() for th in threads):
+            break
+        if t > seconds + 6.0:
+            break
+    return _st_rate(samples), samples[-1][1], errors
+
+
+def run_speedtest(cap_mb, streams=None, seconds=None):
+    """Measure ping + download + upload against the speed endpoints. Returns a result
+    dict and NEVER raises: any failure lands in ["error"] so the caller records the
+    attempt. Saturates the link on purpose - the monitor only calls it BETWEEN check
+    cycles, so a probe can never be measured through the test's own congestion."""
+    streams = streams or SPEEDTEST_STREAMS
+    seconds = seconds or SPEEDTEST_SECONDS
+    res = {"down_bps": None, "up_bps": None, "ping_ms": None,
+           "bytes_down": 0, "bytes_up": 0, "error": None}
+    try:
+        res["ping_ms"] = _st_ping()
+    except Exception as e:
+        res["error"] = f"unreachable: {e}"[:300]
+        return res      # can't even reach the endpoint: don't try to move heavy data
+    errs = []
+    per = max(1, int(cap_mb) * 1_000_000 // streams)
+    if _running:
+        bps, nbytes, e = _st_fanout(_st_down_worker, per, streams, seconds)
+        res["down_bps"], res["bytes_down"] = bps, nbytes
+        errs += e
+    if _running:
+        bps, nbytes, e = _st_fanout(_st_up_worker, per, streams, seconds)
+        res["up_bps"], res["bytes_up"] = bps, nbytes
+        errs += e
+    # per-stream errors only matter when a direction produced no usable rate
+    if errs and (res["down_bps"] is None or res["up_bps"] is None):
+        res["error"] = errs[0][:300]
+    return res
+
+
+def speedtest_due(conn, now):
+    """(due, manual). A run is due when the dashboard queued a run-now request (works
+    even with scheduled tests off), or the configured period has elapsed since the last
+    ATTEMPT - failed attempts advance the clock too, so an unreachable endpoint is
+    retried next period, never hammered every cycle."""
+    if meta_get(conn, "speedtest_request") is not None:
+        return True, True
+    period_h = cfg_speedtest_period_h(conn)
+    if period_h <= 0:
+        return False, False
+    try:
+        last = int(float(meta_get(conn, "speedtest_last_ts", "0") or 0))
+    except ValueError:
+        last = 0
+    return (now - last) >= period_h * 3600, False
+
+
+def run_speedtest_cycle(conn, manual):
+    """One scheduled/requested speed test: measure, record the row, advance the
+    schedule, consume any run-now request, and commit."""
+    now = _now()
+    cap = cfg_speedtest_cap_mb(conn)
+    print(f"[{datetime.now(timezone.utc).isoformat()}] speed test starting "
+          f"({'requested' if manual else 'scheduled'}, cap {cap} MB/direction)", flush=True)
+    res = run_speedtest(cap)
+    conn.execute(
+        "INSERT INTO speedtests (ts, down_bps, up_bps, ping_ms, bytes_down, bytes_up, error) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (now, res["down_bps"], res["up_bps"], res["ping_ms"],
+         res["bytes_down"], res["bytes_up"], res["error"]),
+    )
+    meta_set(conn, "speedtest_last_ts", now)
+    conn.execute("DELETE FROM meta WHERE k='speedtest_request'")
+    conn.commit()
+    mbps = lambda v: "-" if v is None else f"{v / 1e6:.1f} Mbps"  # noqa: E731
+    print(f"[{datetime.now(timezone.utc).isoformat()}] speed test done: "
+          f"down {mbps(res['down_bps'])}, up {mbps(res['up_bps'])}, ping {res['ping_ms']} ms"
+          + (f", error: {res['error']}" if res["error"] else ""), flush=True)
+
+
 # ---- database ---------------------------------------------------------------
 def _cols(conn, table):
     return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
@@ -457,6 +737,23 @@ def init_db(conn):
     # The "slow"/"unstable" quality signals were removed from the app: drop any historical rows so
     # they never resurface. They never counted toward downtime, so no uptime math changes.
     conn.execute("DELETE FROM outages WHERE kind IN ('slow', 'unstable')")
+    # Speed-test results (opt-in feature; the table exists either way). A handful of
+    # rows per day at most, so no retention/thinning applies - history is kept forever,
+    # like outages. Failed attempts are recorded too (down/up NULL + error), so a "why
+    # is there a hole here" is answerable from the data.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS speedtests (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts         INTEGER NOT NULL,
+            down_bps   REAL,
+            up_bps     REAL,
+            ping_ms    REAL,
+            bytes_down INTEGER,
+            bytes_up   INTEGER,
+            error      TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_speedtests_ts ON speedtests(ts)")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS events (
             id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -519,6 +816,14 @@ def cfg_outage_retention(conn):
 
 def cfg_timeout_ms(conn):
     return _cfg(conn, "timeout_ms", TIMEOUT_MS_DEFAULT, CFG_TIMEOUT_OPTIONS)
+
+
+def cfg_speedtest_period_h(conn):
+    return _cfg(conn, "speedtest_period_h", SPEEDTEST_PERIOD_DEFAULT, CFG_SPEEDTEST_PERIOD_OPTIONS)
+
+
+def cfg_speedtest_cap_mb(conn):
+    return _cfg(conn, "speedtest_cap_mb", SPEEDTEST_CAP_DEFAULT, CFG_SPEEDTEST_CAP_OPTIONS)
 
 
 def cfg_targets(conn):
@@ -956,6 +1261,19 @@ def main():
         # Alerts fire only after their event is durably committed.
         for _title, _message in pending_alerts:
             send_alert(alerts["url"], alerts["type"], _title, _message)
+
+        # --- speed test (opt-in), BETWEEN cycles: the loop is sequential, so a probe
+        # can never run while the test saturates the link (no false latency spikes, no
+        # tripping the response cutoff mid-test). Worst-case test duration (~30s, every
+        # socket bounded by its own timeout) stays inside gap_threshold at every
+        # interval/cutoff combination, so it never logs a false no-data gap either.
+        # Only while up: a throughput test during an outage measures nothing, and a
+        # queued run-now request simply waits for the connection to return.
+        if up and _running:
+            st_due, st_manual = speedtest_due(conn, now)
+            if st_due:
+                run_speedtest_cycle(conn, st_manual)
+
         prev_up = up
         prev_dns = dns_ok if up else None      # re-baseline DNS after a line outage
         prev_ts = now
