@@ -512,32 +512,49 @@ def _st_ping(samples=5, timeout=3.0):
         sock.close()
 
 
+# Per-request download size. The endpoint enforces a dynamic per-request budget
+# (measured: 250 MB requests are refused outright with a 403; ~100 MB starts being
+# refused once the IP has been busy; 50 MB passes even then). The cap is therefore
+# fetched in chunks over ONE keep-alive connection, so the TCP window survives
+# between chunks and throughput barely dips at the boundaries (~1 RTT per chunk).
+SPEEDTEST_DOWN_CHUNK = 50_000_000
+
+
 def _st_down_worker(nbytes, deadline, add, errors):
-    """One download stream: a single big GET, counting body bytes as they arrive until
-    the response is complete or the deadline hits (the rest is abandoned). A rejected
-    request (the endpoint's abuse protection can 403 a burst) is retried once on a
-    fresh connection after a short pause; the rate math only measures the window where
-    bytes actually flowed, so a lost first attempt costs test time, not accuracy."""
+    """One download stream: sequential keep-alive GETs of SPEEDTEST_DOWN_CHUNK bytes
+    until the per-stream share of the cap is moved or the deadline hits. A rejected
+    or dropped request is retried once on a fresh connection after a real pause; the
+    rate math only measures the window where bytes flowed, so a lost first attempt
+    costs test time, not accuracy."""
     last_err = None
     for _attempt in (1, 2):
         sock = None
         try:
             sock = _st_sock(2.0)
-            sock.sendall((f"GET /__down?bytes={nbytes} HTTP/1.1\r\nHost: {SPEEDTEST_HOST}\r\n"
-                          "User-Agent: ConnectionWatchman/1.0\r\nAccept: */*\r\n"
-                          "Connection: close\r\n\r\n").encode("ascii"))
-            status, body = _st_read_headers(sock)
-            if status != 200:
-                raise OSError(f"HTTP {status}")
-            add(len(body))
-            while time.monotonic() < deadline:
-                try:
-                    chunk = sock.recv(1 << 16)
-                except socket.timeout:
-                    continue    # stalled: no bytes counted for the stall, which is the truth
-                if not chunk:
-                    break       # response complete (per-stream share of the cap exhausted)
-                add(len(chunk))
+            remaining = nbytes
+            while remaining > 0 and time.monotonic() < deadline:
+                req = min(remaining, SPEEDTEST_DOWN_CHUNK)
+                sock.sendall((f"GET /__down?bytes={req} HTTP/1.1\r\nHost: {SPEEDTEST_HOST}\r\n"
+                              "User-Agent: ConnectionWatchman/1.0\r\nAccept: */*\r\n\r\n").encode("ascii"))
+                status, body = _st_read_headers(sock)
+                if status != 200:
+                    raise OSError(f"HTTP {status}")
+                got = len(body)
+                add(got)
+                # Read exactly this response's body (the server sends exactly `req`
+                # bytes) so the connection is positioned for the next request.
+                while got < req:
+                    if time.monotonic() >= deadline:
+                        return   # deadline mid-body: measured enough, abandon the rest
+                    try:
+                        chunk = sock.recv(1 << 16)
+                    except socket.timeout:
+                        continue    # stalled: no bytes counted for the stall, the truth
+                    if not chunk:
+                        raise OSError("connection closed mid-body")
+                    got += len(chunk)
+                    add(len(chunk))
+                remaining -= req
             return
         except Exception as e:
             last_err = e
