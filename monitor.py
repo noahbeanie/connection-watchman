@@ -30,10 +30,10 @@ drop. DNS is only evaluated while connectivity is up (when the line is down,
 DNS fails too and is already covered by the connectivity outage).
 
 Optionally (off by default, enabled from the dashboard), a SPEED TEST runs every
-few hours: parallel HTTPS streams against Cloudflare's speed endpoints measure
-real download/upload throughput + ping, recorded to the speedtests table. It runs
-between check cycles so its deliberate link saturation can never contaminate a
-probe reading.
+few hours against Cloudflare's speed endpoints, measuring real download/upload
+throughput + ping into the speedtests table (one saturating download stream;
+parallel upload streams). It runs between check cycles so its deliberate link
+saturation can never contaminate a probe reading.
 
 Reboots / pauses create GAPS in the log; gaps are recorded as events and count
 as neither up nor down (so they can never inflate uptime). Storage is tiered:
@@ -104,7 +104,13 @@ CFG_SPEEDTEST_CAP_OPTIONS = (25, 50, 100, 250, 500)   # MB per direction per tes
 SPEEDTEST_PERIOD_DEFAULT = int(os.environ.get("UPTIME_SPEEDTEST_PERIOD_H", "0") or 0)
 SPEEDTEST_CAP_DEFAULT = int(os.environ.get("UPTIME_SPEEDTEST_CAP_MB", "100") or 100)
 SPEEDTEST_HOST = os.environ.get("UPTIME_SPEEDTEST_HOST", "speed.cloudflare.com")
-SPEEDTEST_STREAMS = max(1, int(os.environ.get("UPTIME_SPEEDTEST_STREAMS", "4")))
+# Stream counts are ASYMMETRIC on purpose. Cloudflare's __down endpoint 403s
+# concurrent downloads from one IP (its abuse protection; their own client measures
+# sequentially), and a single download stream saturates any link this box can
+# terminate anyway. __up tolerates concurrency and NEEDS it: one TCP stream's
+# congestion window caps upload well below a fast line's rate at typical RTTs.
+SPEEDTEST_STREAMS = max(1, int(os.environ.get("UPTIME_SPEEDTEST_STREAMS", "4")))        # upload
+SPEEDTEST_DOWN_STREAMS = max(1, int(os.environ.get("UPTIME_SPEEDTEST_DOWN_STREAMS", "1")))
 SPEEDTEST_SECONDS = float(os.environ.get("UPTIME_SPEEDTEST_SECONDS", "8"))  # per direction
 CONFIRM_RETRIES = int(os.environ.get("UPTIME_CONFIRM_RETRIES", "3"))  # extra tries before "down"
 RETRY_GAP = float(os.environ.get("UPTIME_RETRY_GAP", "1.0"))   # seconds between confirm tries
@@ -434,13 +440,20 @@ def classify_net_cause(gw):
 
 
 # ---- speed test ---------------------------------------------------------------
-# Throughput is measured the way browser speed tests do it: several parallel HTTPS
-# streams against Cloudflare's public speed endpoints, counting bytes over a fixed
-# time window. Parallel streams matter: a single TLS stream tops out well below a
-# fast line's capacity (especially on a Pi), so one stream under-reads.
-def _st_sock(timeout, sndbuf=None):
+# Throughput is measured against Cloudflare's public speed endpoints by counting
+# transferred bytes over a fixed time window: one full-rate stream for download
+# (concurrent __down requests trip the endpoint's abuse protection, and one TCP
+# stream saturates any link this box terminates), several parallel streams for
+# upload (a single stream's congestion window caps well below a fast uplink).
+def _st_sock(timeout):
     """TCP+TLS socket to the speed-test host. Honors the VPN-bypass fwmark like every
-    other probe socket, so throughput is measured on the same path the checks watch."""
+    other probe socket, so throughput is measured on the same path the checks watch.
+
+    Deliberately does NOT set SO_SNDBUF/SO_RCVBUF: an explicit size disables the
+    kernel's buffer autotuning and caps throughput at buffer/RTT (a 128 KB send
+    buffer at 25 ms RTT strangles each upload stream to ~40 Mbps - measured). With
+    autotuning, buffers track the congestion window, so the count-what-the-kernel-
+    accepted upload skew stays proportionally small on fast AND slow uplinks."""
     import ssl
     last = None
     for af, st, proto, _cn, sa in socket.getaddrinfo(SPEEDTEST_HOST, 443, type=socket.SOCK_STREAM):
@@ -448,11 +461,6 @@ def _st_sock(timeout, sndbuf=None):
         try:
             if FWMARK:
                 s.setsockopt(socket.SOL_SOCKET, SO_MARK, FWMARK)
-            if sndbuf:
-                # Small kernel send buffer so "bytes sent" tracks the wire: with the
-                # default buffer, megabytes count as sent while parked locally, which
-                # inflates the upload rate on slow uplinks.
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, sndbuf)
             s.settimeout(timeout)
             s.connect(sa)
             ctx = ssl.create_default_context()
@@ -506,34 +514,43 @@ def _st_ping(samples=5, timeout=3.0):
 
 def _st_down_worker(nbytes, deadline, add, errors):
     """One download stream: a single big GET, counting body bytes as they arrive until
-    the response is complete or the deadline hits (the rest is abandoned)."""
-    try:
-        sock = _st_sock(2.0)
-    except Exception as e:
-        errors.append(f"down: {e}")
-        return
-    try:
-        sock.sendall((f"GET /__down?bytes={nbytes} HTTP/1.1\r\nHost: {SPEEDTEST_HOST}\r\n"
-                      "User-Agent: ConnectionWatchman/1.0\r\nConnection: close\r\n\r\n").encode("ascii"))
-        status, body = _st_read_headers(sock)
-        if status != 200:
-            raise OSError(f"HTTP {status}")
-        add(len(body))
-        while time.monotonic() < deadline:
-            try:
-                chunk = sock.recv(1 << 16)
-            except socket.timeout:
-                continue    # stalled: no bytes counted for the stall, which is the truth
-            if not chunk:
-                break       # response complete (per-stream share of the cap exhausted)
-            add(len(chunk))
-    except Exception as e:
-        errors.append(f"down: {e}")
-    finally:
+    the response is complete or the deadline hits (the rest is abandoned). A rejected
+    request (the endpoint's abuse protection can 403 a burst) is retried once on a
+    fresh connection after a short pause; the rate math only measures the window where
+    bytes actually flowed, so a lost first attempt costs test time, not accuracy."""
+    last_err = None
+    for _attempt in (1, 2):
+        sock = None
         try:
-            sock.close()
-        except OSError:
-            pass
+            sock = _st_sock(2.0)
+            sock.sendall((f"GET /__down?bytes={nbytes} HTTP/1.1\r\nHost: {SPEEDTEST_HOST}\r\n"
+                          "User-Agent: ConnectionWatchman/1.0\r\nAccept: */*\r\n"
+                          "Connection: close\r\n\r\n").encode("ascii"))
+            status, body = _st_read_headers(sock)
+            if status != 200:
+                raise OSError(f"HTTP {status}")
+            add(len(body))
+            while time.monotonic() < deadline:
+                try:
+                    chunk = sock.recv(1 << 16)
+                except socket.timeout:
+                    continue    # stalled: no bytes counted for the stall, which is the truth
+                if not chunk:
+                    break       # response complete (per-stream share of the cap exhausted)
+                add(len(chunk))
+            return
+        except Exception as e:
+            last_err = e
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        if time.monotonic() + 5.0 >= deadline:
+            break               # not enough window left for a retry to measure anything
+        time.sleep(4.0)         # the endpoint's rate limiter needs a real pause, not a blink
+    errors.append(f"down: {last_err}")
 
 
 _ST_BLOCK = os.urandom(1 << 16)   # one reusable 64 KiB block of incompressible payload
@@ -544,7 +561,7 @@ def _st_up_worker(nbytes, deadline, add, errors):
     the kernel accepts them, until done or the deadline (then the POST is abandoned;
     the server just discards it)."""
     try:
-        sock = _st_sock(5.0, sndbuf=1 << 17)
+        sock = _st_sock(5.0)
     except Exception as e:
         errors.append(f"up: {e}")
         return
@@ -571,18 +588,23 @@ def _st_up_worker(nbytes, deadline, add, errors):
 
 
 def _st_rate(samples):
-    """bits/s from (elapsed_s, total_bytes) samples. The first second is skipped when
-    the test ran long enough to afford it (TCP slow start reads as a falsely low rate),
-    and trailing samples after growth stopped are trimmed (cap exhausted before the
-    clock). Returns None when nothing usable transferred."""
+    """bits/s from (elapsed_s, total_bytes) samples, measured over the window where
+    bytes actually FLOWED: leading no-growth samples are trimmed (a retried first
+    request loses time, not accuracy), trailing no-growth samples are trimmed (cap
+    exhausted before the clock), and the first second after flow starts is skipped
+    when the window is long enough to afford it (TCP slow start reads as a falsely
+    low rate). Returns None when nothing usable transferred."""
     end = len(samples) - 1
     while end > 0 and samples[end - 1][1] == samples[end][1]:
         end -= 1
+    start = 0
+    while start < end - 1 and samples[start + 1][1] == samples[start][1]:
+        start += 1
     t1, b1 = samples[end]
-    t0, b0 = samples[0]
-    if t1 > 3.0:
-        for t, b in samples:
-            if t >= 1.0:
+    t0, b0 = samples[start]
+    if t1 - t0 > 3.0:
+        for t, b in samples[start:end + 1]:
+            if t - samples[start][0] >= 1.0:
                 t0, b0 = t, b
                 break
     if t1 <= t0 or b1 <= b0:
@@ -638,13 +660,14 @@ def run_speedtest(cap_mb, streams=None, seconds=None):
         res["error"] = f"unreachable: {e}"[:300]
         return res      # can't even reach the endpoint: don't try to move heavy data
     errs = []
-    per = max(1, int(cap_mb) * 1_000_000 // streams)
-    if _running:
-        bps, nbytes, e = _st_fanout(_st_down_worker, per, streams, seconds)
+    cap = int(cap_mb) * 1_000_000
+    if _running:   # download: sequential-friendly (see the stream-count note up top)
+        bps, nbytes, e = _st_fanout(
+            _st_down_worker, max(1, cap // SPEEDTEST_DOWN_STREAMS), SPEEDTEST_DOWN_STREAMS, seconds)
         res["down_bps"], res["bytes_down"] = bps, nbytes
         errs += e
-    if _running:
-        bps, nbytes, e = _st_fanout(_st_up_worker, per, streams, seconds)
+    if _running:   # upload: parallel streams, one TCP window can't fill a fast uplink
+        bps, nbytes, e = _st_fanout(_st_up_worker, max(1, cap // streams), streams, seconds)
         res["up_bps"], res["bytes_up"] = bps, nbytes
         errs += e
     # per-stream errors only matter when a direction produced no usable rate

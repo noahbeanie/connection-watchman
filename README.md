@@ -67,8 +67,10 @@ reachable-but-crawling link counts as down. TCP-connect is used over ICMP becaus
 root and isn't rate-limited. Latency is the connect that answered.
 
 **Speed** (optional, off by default): every few hours a speed test measures real download /
-upload throughput and ping against Cloudflare's speed endpoints (speed.cloudflare.com), using
-several parallel HTTPS streams — the same idea as speedtest.net, still pure stdlib. It runs
+upload throughput and ping against Cloudflare's speed endpoints (speed.cloudflare.com) — the
+same idea as speedtest.net, still pure stdlib. Download uses one full-rate stream (the endpoint
+rejects concurrent downloads, and one stream saturates the host's link); upload uses several
+parallel streams (one TCP stream can't fill a fast uplink). It runs
 *between* connectivity checks, so its deliberate link saturation can never register as an outage
 or a latency spike. Each test moves real data (up to a configurable cap per direction), which is
 why it's opt-in: enable and tune it from the dashboard's Speed panel.
@@ -122,8 +124,8 @@ Hit **Test** to send a sample.
 ## Speed tests (optional)
 
 The **Speed** panel tracks what you're actually getting for what you pay for. Turn it on by
-picking a schedule (every 4h to daily); each run measures download, upload, and ping with
-parallel HTTPS streams against `speed.cloudflare.com`, and results chart over any range —
+picking a schedule (every 4h to daily); each run measures download, upload, and ping against
+`speed.cloudflare.com`, and results chart over any range —
 so a line that's slowly degrading, or only slow every evening, becomes visible the same way
 outages are. **Test now** runs a one-off reading anytime (works with scheduling off).
 

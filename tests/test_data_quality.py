@@ -303,6 +303,17 @@ class SpeedTestRateTest(unittest.TestCase):
         self.assertIsNone(monitor._st_rate([(0.0, 0), (1.0, 0), (2.0, 0)]))
         self.assertIsNone(monitor._st_rate([(0.0, 0)]))
 
+    def test_leading_idle_trimmed_after_retried_request(self):
+        """A rejected-then-retried first request leaves a dead leading window; the
+        rate must cover only the span where bytes flowed, not average the dead air."""
+        samples = [(i * 0.05, 0) for i in range(41)]            # 2s dead (403 + retry pause)
+        b = 0
+        for i in range(41, 161):                                # then 6s at 10 MB/s
+            b += 500_000
+            samples.append((i * 0.05, b))
+        rate = monitor._st_rate(samples)
+        self.assertAlmostEqual(rate, 10e6 * 8, delta=0.05 * 10e6 * 8)
+
 
 class SpeedTestScheduleTest(unittest.TestCase):
     def test_off_by_default(self):
